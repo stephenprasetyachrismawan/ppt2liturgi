@@ -14,6 +14,37 @@ const extractTextFromPptxXml = (xml) => {
   return paragraphs.join('\n');
 };
 
+// ── PDF text extraction (runs in browser via PDF.js) ─────────────────────────
+const extractTextFromPdf = async (fileRaw) => {
+  if (!window.pdfjsLib) throw new Error("PDF.js belum dimuat");
+  const arrayBuffer = await fileRaw.arrayBuffer();
+  const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+  const pages = [];
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const textContent = await page.getTextContent();
+
+    // Group text items by Y position to reconstruct reading lines
+    const lineMap = new Map();
+    for (const item of textContent.items) {
+      if (!item.str || !item.str.trim()) continue;
+      const y = Math.round(item.transform[5]);
+      if (!lineMap.has(y)) lineMap.set(y, []);
+      lineMap.get(y).push({ x: item.transform[4], str: item.str });
+    }
+
+    // Sort Y descending (PDF origin is bottom-left, we want top-down)
+    const sortedYs = [...lineMap.keys()].sort((a, b) => b - a);
+    const lines = sortedYs
+      .map(y => lineMap.get(y).sort((a, b) => a.x - b.x).map(i => i.str).join(''))
+      .filter(l => l.trim());
+
+    if (lines.length > 0) pages.push({ pageNum, text: lines.join('\n') });
+  }
+  return pages;
+};
+
 // ── Real Gemini parse pipeline ────────────────────────────────────────────────
 const runGeminiParsing = async ({ fileRaw, apiKey, rules, addLog, setSlides, setStep }) => {
   const parseStart = Date.now();
@@ -24,42 +55,76 @@ const runGeminiParsing = async ({ fileRaw, apiKey, rules, addLog, setSlides, set
     return `0${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}.${c}`;
   };
 
-  // Step 1: extract PPTX text
-  addLog({ t: ts(), k: "info", tag: "EXTRACT", body: "Membaca PPTX dengan JSZip…" });
+  const isPdf = fileRaw.name.toLowerCase().endsWith('.pdf');
   let slideTexts = [];
-  try {
-    const zip = await window.JSZip.loadAsync(fileRaw);
-    const names = Object.keys(zip.files)
-      .filter(n => /^ppt\/slides\/slide\d+\.xml$/.test(n))
-      .sort((a, b) => parseInt(a.match(/\d+/)[0]) - parseInt(b.match(/\d+/)[0]));
 
-    for (const name of names) {
-      const xml = await zip.files[name].async('text');
-      const text = extractTextFromPptxXml(xml);
-      if (text.trim()) slideTexts.push(text);
+  // Step 1: extract text (PDF or PPTX)
+  if (isPdf) {
+    addLog({ t: ts(), k: "info", tag: "EXTRACT", body: "Membaca PDF dengan PDF.js…" });
+    try {
+      const pages = await extractTextFromPdf(fileRaw);
+      slideTexts = pages.map(p => p.text);
+      addLog({ t: ts(), k: "ok", tag: "EXTRACT", body: `${pages.length} halaman PDF berhasil diekstrak` });
+    } catch (e) {
+      addLog({ t: ts(), k: "warn", tag: "EXTRACT", body: `Gagal baca PDF: ${e.message} — fallback ke data demo` });
+      setSlides(window.SAMPLE_SLIDES); setStep(1); return;
     }
-    addLog({ t: ts(), k: "ok", tag: "EXTRACT", body: `${slideTexts.length} slide dengan teks berhasil diekstrak dari ${names.length} total` });
-  } catch (e) {
-    addLog({ t: ts(), k: "warn", tag: "EXTRACT", body: `Gagal baca PPTX: ${e.message} — fallback ke data demo` });
-    setSlides(window.SAMPLE_SLIDES);
-    setStep(1);
-    return;
+  } else {
+    addLog({ t: ts(), k: "info", tag: "EXTRACT", body: "Membaca PPTX dengan JSZip…" });
+    try {
+      const zip = await window.JSZip.loadAsync(fileRaw);
+      const names = Object.keys(zip.files)
+        .filter(n => /^ppt\/slides\/slide\d+\.xml$/.test(n))
+        .sort((a, b) => parseInt(a.match(/\d+/)[0]) - parseInt(b.match(/\d+/)[0]));
+      for (const name of names) {
+        const xml = await zip.files[name].async('text');
+        const text = extractTextFromPptxXml(xml);
+        if (text.trim()) slideTexts.push(text);
+      }
+      addLog({ t: ts(), k: "ok", tag: "EXTRACT", body: `${slideTexts.length} slide dengan teks diekstrak dari ${names.length} total` });
+    } catch (e) {
+      addLog({ t: ts(), k: "warn", tag: "EXTRACT", body: `Gagal baca PPTX: ${e.message} — fallback ke data demo` });
+      setSlides(window.SAMPLE_SLIDES); setStep(1); return;
+    }
   }
 
   if (slideTexts.length === 0) {
-    addLog({ t: ts(), k: "warn", tag: "EXTRACT", body: "Tidak ada teks ditemukan (mungkin slide berisi gambar saja) — fallback ke data demo" });
-    setSlides(window.SAMPLE_SLIDES);
-    setStep(1);
-    return;
+    addLog({ t: ts(), k: "warn", tag: "EXTRACT", body: "Tidak ada teks ditemukan — fallback ke data demo" });
+    setSlides(window.SAMPLE_SLIDES); setStep(1); return;
   }
 
-  // Step 2: send to Gemini
-  addLog({ t: ts(), k: "info", tag: "AI", body: `Mengirim ${slideTexts.length} slide ke Gemini 1.5 Flash…` });
-  try {
-    const systemPrompt = rules.map(r => `[${r.k}] ${r.body}`).join('\n');
-    const slideInput = slideTexts.map((t, i) => `--- Slide ${i + 1} ---\n${t}`).join('\n\n');
-    const prompt = `${systemPrompt}\n\nBerikut adalah ${slideTexts.length} slide liturgi:\n\n${slideInput}\n\nKeluarkan hanya JSON array sesuai schema di atas:`;
+  // Step 2: build Gemini prompt (different for PDF vs PPTX)
+  const systemPrompt = rules.map(r => `[${r.k}] ${r.body}`).join('\n');
+  let prompt;
 
+  if (isPdf) {
+    const fullText = slideTexts.map((t, i) => `=== Halaman ${i + 1} ===\n${t}`).join('\n\n');
+    addLog({ t: ts(), k: "info", tag: "AI", body: `Mengirim ${slideTexts.length} halaman PDF ke Gemini 1.5 Flash…` });
+    prompt = `${systemPrompt}
+
+Berikut adalah teks lengkap liturgi dari PDF (${slideTexts.length} halaman).
+Strukturkan seluruh teks ini menjadi JSON array slide subtitle sesuai aturan di atas.
+PENTING: ikuti ALUR LITURGI dari awal sampai akhir — sisipkan setiap kidung TEPAT di titik ia dipanggil.
+Jangan kumpulkan semua kidung di akhir. Label speaker (PF:, J:, L:, dll) wajib dipertahankan.
+
+TEKS LITURGI:
+${fullText}
+
+Output hanya JSON array:`;
+  } else {
+    const slideInput = slideTexts.map((t, i) => `--- Slide ${i + 1} ---\n${t}`).join('\n\n');
+    addLog({ t: ts(), k: "info", tag: "AI", body: `Mengirim ${slideTexts.length} slide ke Gemini 1.5 Flash…` });
+    prompt = `${systemPrompt}
+
+Berikut adalah ${slideTexts.length} slide liturgi dari PPTX:
+
+${slideInput}
+
+Keluarkan hanya JSON array sesuai schema di atas:`;
+  }
+
+  // Step 3: call Gemini API
+  try {
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
       {
@@ -100,13 +165,16 @@ const runGeminiParsing = async ({ fileRaw, apiKey, rules, addLog, setSlides, set
       body: s.body || '',
       ref: s.ref || '',
       needs_split: s.needs_split || false,
+      needs_hymn_lookup: s.needs_hymn_lookup || false,
       language: s.language || 'id',
     }));
 
     const splitCount = result.filter(s => s.needs_split).length;
-    if (splitCount > 0) addLog({ t: ts(), k: "warn", tag: "AI", body: `${splitCount} slide bertanda needs_split: true — dapat dipecah di editor` });
+    const lookupCount = result.filter(s => s.needs_hymn_lookup).length;
+    if (splitCount > 0) addLog({ t: ts(), k: "warn", tag: "AI", body: `${splitCount} slide perlu dipecah (needs_split) — gunakan tombol Split di editor` });
+    if (lookupCount > 0) addLog({ t: ts(), k: "warn", tag: "AI", body: `${lookupCount} slide memerlukan lirik kidung eksternal (needs_hymn_lookup) — isi manual di editor` });
 
-    addLog({ t: ts(), k: "ok", tag: "PARSE", body: `${result.length} slide subtitle dihasilkan dari ${slideTexts.length} slide input` });
+    addLog({ t: ts(), k: "ok", tag: "PARSE", body: `${result.length} slide subtitle dihasilkan dari ${slideTexts.length} ${isPdf ? 'halaman' : 'slide'} input` });
     const tokEst = Math.round(prompt.length / 4);
     addLog({ t: ts(), k: "ok", tag: "DONE", body: `Selesai — perkiraan ${tokEst.toLocaleString()} token (~gratis dengan API key AI Studio)` });
 
@@ -532,13 +600,17 @@ const PageUpload = ({ go, lang, file, setFile }) => {
   const handleRealFile = (f) => {
     if (!f) return;
     const ext = f.name.split('.').pop().toLowerCase();
-    if (!['pptx', 'ppt', 'pdf'].includes(ext)) return;
+    if (!['pptx', 'ppt', 'pdf'].includes(ext)) {
+      alert('Format tidak didukung. Gunakan .pptx, .ppt, atau .pdf');
+      return;
+    }
     setFile({
       name: f.name,
       size: (f.size / 1024 / 1024).toFixed(1) + ' MB',
       slides: '?',
       modified: new Date(f.lastModified).toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' }),
       _raw: f,
+      ext,
     });
   };
 
@@ -550,7 +622,7 @@ const PageUpload = ({ go, lang, file, setFile }) => {
         <div>
           <div className="h-eyebrow">02 / Upload</div>
           <h1 className="h-title">{t("Unggah liturgi mingguan", "Upload weekly liturgy")}</h1>
-          <div className="h-sub">{t("Format yang didukung: .pptx, .ppt. Teks diekstrak di browser dengan JSZip — file tidak pernah meninggalkan perangkat Anda.", "Supported: .pptx, .ppt. Text is extracted in your browser with JSZip — the file never leaves your device.")}</div>
+          <div className="h-sub">{t("Format yang didukung: .pptx, .ppt, .pdf. Teks diekstrak di browser (JSZip untuk PPTX, PDF.js untuk PDF) — file tidak pernah meninggalkan perangkat Anda.", "Supported: .pptx, .ppt, .pdf. Text is extracted in your browser (JSZip for PPTX, PDF.js for PDF) — the file never leaves your device.")}</div>
         </div>
         <button className="btn" disabled={!file} onClick={() => go("parse")}>{t("Lanjut: Parse", "Next: Parse")} <Icon name="arrowR" size={14} /></button>
       </div>
@@ -568,10 +640,10 @@ const PageUpload = ({ go, lang, file, setFile }) => {
                onClick={() => inputRef.current?.click()}>
             <div className="ic"><Icon name="upload" size={22} /></div>
             <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 4 }}>{t("Tarik file ke sini, atau klik untuk pilih", "Drop a file here, or click to choose")}</div>
-            <div style={{ fontSize: 13, color: "var(--muted)" }}>.pptx · .ppt — {t("maks 50 MB", "max 50 MB")}</div>
+            <div style={{ fontSize: 13, color: "var(--muted)" }}>.pptx · .ppt · .pdf — {t("maks 50 MB", "max 50 MB")}</div>
             <div style={{ display: "inline-flex", gap: 6, marginTop: 18 }}>
-              <span className="chip">{t("Teks diekstrak lokal", "Local text extract")}</span>
-              <span className="chip">JSZip</span>
+              <span className="chip">{t("Ekstrak lokal", "Local extract")}</span>
+              <span className="chip">JSZip + PDF.js</span>
               <span className="chip green dot">Gemini 1.5 Flash</span>
             </div>
           </div>
@@ -580,11 +652,13 @@ const PageUpload = ({ go, lang, file, setFile }) => {
             <div style={{ marginTop: 20 }}>
               <div className="label" style={{ marginBottom: 8 }}>{t("File terpilih", "Selected file")}</div>
               <div className="file-row">
-                <div className="file-icon">PPTX</div>
+                <div className="file-icon" style={{ background: file.ext === 'pdf' ? 'linear-gradient(135deg, #dc2626, #991b1b)' : undefined }}>
+                  {file.ext === 'pdf' ? 'PDF' : 'PPTX'}
+                </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 600, fontSize: 14 }}>{file.name}</div>
                   <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "Geist Mono", marginTop: 2 }}>
-                    {file.size} · {file.slides !== '?' ? `${file.slides} slides` : t("menghitung…", "counting…")} · {file.modified}
+                    {file.size} · {file.slides !== '?' ? `${file.slides} ${t("slide", "slides")}` : (file._raw ? t("menghitung…", "counting…") : "14 slides")} · {file.modified}
                   </div>
                 </div>
                 <button className="btn sm" onClick={() => setFile(null)}><Icon name="x" size={12} /></button>
@@ -699,7 +773,7 @@ const PageParse = ({ go, lang, file, slides, setSlides, apiKeys, activeProvider,
   const displayLog = isRealMode ? realLog : window.PARSE_LOG.slice(0, logIdx);
 
   const stages = [
-    { k: "extract", label: t("Ekstrak teks dari PPTX", "Extract text from PPTX"), n: 1 },
+    { k: "extract", label: t("Ekstrak teks dari file", "Extract text from file"), n: 1 },
     { k: "ai", label: t("Gemini klasifikasi & split", "Gemini classify & split"), n: 2 },
     { k: "schema", label: t("Validasi schema JSON", "Validate JSON schema"), n: 3 },
     { k: "done", label: t("Slide siap diedit", "Slides ready to edit"), n: 4 },
@@ -732,7 +806,7 @@ const PageParse = ({ go, lang, file, slides, setSlides, apiKeys, activeProvider,
           </h1>
           <div className="h-sub">
             {isRealMode
-              ? t("JSZip mengekstrak teks dari PPTX; Gemini 1.5 Flash mengklasifikasi tiap slide ke 8 kategori liturgi.", "JSZip extracts text from PPTX; Gemini 1.5 Flash classifies slides into 8 liturgy categories.")
+              ? t("JSZip (PPTX) atau PDF.js (PDF) mengekstrak teks di browser; Gemini 1.5 Flash mengklasifikasi ke 8 kategori liturgi.", "JSZip (PPTX) or PDF.js (PDF) extracts text in browser; Gemini 1.5 Flash classifies into 8 liturgy categories.")
               : t("Mode demo — tidak ada file nyata atau API key Gemini. Masuk Settings untuk menghubungkan Gemini.", "Demo mode — no real file or Gemini API key. Go to Settings to connect Gemini.")}
           </div>
         </div>
@@ -744,7 +818,7 @@ const PageParse = ({ go, lang, file, slides, setSlides, apiKeys, activeProvider,
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr", gap: 24 }}>
         <div className="card" style={{ padding: 20 }}>
           <div className="row gap-3" style={{ marginBottom: 16 }}>
-            <div className="file-icon" style={{ width: 32, height: 40 }}>PPTX</div>
+            <div className="file-icon" style={{ width: 32, height: 40, background: file?.ext === 'pdf' ? 'linear-gradient(135deg,#e53e3e,#c53030)' : undefined }}>{file?.ext === 'pdf' ? 'PDF' : 'PPTX'}</div>
             <div>
               <div style={{ fontWeight: 600, fontSize: 13 }}>{file?.name || "Liturgi Minggu 04 Mei 2026.pptx"}</div>
               <div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "Geist Mono" }}>

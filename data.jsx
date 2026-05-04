@@ -94,14 +94,18 @@ const PROVIDERS = [
 ];
 
 const PROMPT_RULES = [
-  { k: "ROLE", body: "Anda adalah parser liturgi gereja Reformed (GKJ/GKI). Ekstrak setiap elemen liturgi dari slide PowerPoint yang diberikan menjadi struktur JSON terurut." },
-  { k: "TYPES", body: "Kategorikan setiap slide ke salah satu: votum, hymn, verse, creed, prayer, warta, sermon, blessing. Jangan ciptakan kategori baru di luar daftar." },
-  { k: "SPLIT", body: "Untuk lirik kidung (KJ/PKJ), pisahkan setiap bait sebagai slide tersendiri. Untuk ayat panjang (>40 kata), pisahkan per kalimat dengan akhiran -a, -b, -c pada referensi." },
-  { k: "REF", body: "Untuk slide ayat Alkitab, ekstrak referensi (kitab pasal:ayat) dan tampilkan di bawah teks. Format: \"Yohanes 3:16\", bukan \"Joh. 3.16\"." },
-  { k: "CLEAN", body: "Buang nomor slide, footer, header gereja, dan watermark. Jangan menerjemahkan teks; pertahankan bahasa asli (Indonesia/Jawa/Inggris)." },
-  { k: "TYPO", body: "Perbaiki typo OCR umum (misal '1' → 'I', 'rn' → 'm') hanya untuk kata yang jelas salah baca. Jangan ubah ejaan kuno hymn (mis. 'kar'na', 't'rang')." },
-  { k: "MAX", body: "Maksimum 80 karakter per baris pada slide subtitle. Bila lebih panjang, tandai needs_split: true sehingga editor dapat memecah otomatis." },
-  { k: "META", body: "Sertakan field: type, title, subtitle, body, ref, needs_split, language. Output dalam JSON array, tanpa komentar atau penjelasan tambahan." },
+  { k: "ROLE", body: "Anda adalah parser liturgi deterministik untuk gereja Reformed (GKJ/GKI). Tugasmu HANYA mengkonversi teks liturgi menjadi JSON array slide subtitle yang terurut. Ikuti setiap aturan secara ketat — jangan berimprovisasi, jangan menebak, jangan diam-diam mengubah aturan." },
+  { k: "TYPES", body: "Kategorikan setiap slide ke salah satu type: votum, hymn, verse, creed, prayer, warta, sermon, blessing. Jangan ciptakan type baru." },
+  { k: "SPEAKER", body: "WAJIB pertahankan semua label speaker/peran: PF:, Psw:, P:, PL:, J:, L:, WL:, U:, MJ:, MJ1:, MJ2:, MJ3:, L1:, L2:, Pnt:, P1:, P2:, dan sejenisnya. Format: 'ROLE: teks'. Jangan hilangkan label. Jangan pisahkan label dari teksnya. Jika teks berlanjut ke slide berikutnya, ulangi label speaker agar tetap jelas." },
+  { k: "SLASH", body: "Hapus SEMUA karakter '/' dan '\\' dari teks yang akan ditampilkan. Jika penghapusan menyebabkan kata bergabung tak terbaca, ganti dengan satu spasi. Pastikan tidak ada satu pun slash tersisa di output." },
+  { k: "HYMN_ORDER", body: "KRITIS: Setiap kidung/lagu HARUS disisipkan TEPAT di titik liturgi di mana ia dipanggil dalam teks liturgi utama — BUKAN dikumpulkan di akhir. Jika dokumen memiliki halaman lampiran/apendiks kidung di belakang, gunakan HANYA sebagai sumber teks lirik. Urutan slide mengikuti alur ibadah dari awal hingga akhir." },
+  { k: "SPLIT", body: "Maksimum 2 baris per slide. Target sekitar 94 karakter total per slide. Pecah per frasa atau klausa alami. Jangan pecah di tengah kata. Jangan pecah judul lagu atau judul seksi ke slide berbeda. Jangan pisahkan label speaker dari teksnya di akhir slide. Tandai needs_split: true jika slide melebihi 94 karakter." },
+  { k: "STANZA", body: "Setiap bait/stanza kidung HARUS dimulai di slide baru yang terpisah. Jangan pernah mencampur baris terakhir bait N dengan baris pertama bait N+1 dalam satu slide. Refrain yang berulang dibuat slide tersendiri. Selesaikan satu bait penuh sebelum bait berikutnya dimulai." },
+  { k: "LYRICS", body: "Untuk lirik: buang tanda '-' di awal baris jika hanya sebagai bullet visual. Tulis teks refrain secara lengkap — jangan disingkat menjadi 'Refr.' atau 'Ref.' kecuali teks refrain sudah ditampilkan penuh sebelumnya. Pastikan segmentasi lirik terasa natural untuk dinyanyikan." },
+  { k: "HYMN_LOOKUP", body: "Jika teks menyebut kidung tapi lirik tidak tersedia atau tidak lengkap di dokumen, isi body dengan '[Lirik KODE nomor:bait diperlukan]', set needs_hymn_lookup: true, dan sertakan referensi lengkap di field ref (contoh: 'KJ 28:1-2', 'PKJ 13:1,3', 'NKB 172:1-2')." },
+  { k: "REF", body: "Referensi Alkitab: format 'Yohanes 3:16', bukan 'Joh. 3.16'. Untuk kidung: 'KJ 28:1', 'PKJ 13:1,3', 'NKB 172:1-2'. Sertakan di field ref." },
+  { k: "CLEAN", body: "Pertahankan teks PERSIS seperti tertulis di dokumen kecuali normalisasi yang diizinkan: hapus slash, normalisasi label speaker, buang bullet '-' lirik. Jangan terjemahkan, jangan ringkas, jangan tambah kata, jangan hapus instruksi liturgi." },
+  { k: "META", body: "Field wajib per slide: type (string), title (judul seksi/lagu), subtitle (label speaker atau 'Bait N'/info bait), body (teks maks 2 baris ~94 karakter), ref (referensi Alkitab/kidung atau null), language (id/jw/en), needs_split (boolean), needs_hymn_lookup (boolean). Output HANYA JSON array, tanpa komentar atau penjelasan." },
 ];
 
 const PARSE_LOG = [
