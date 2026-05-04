@@ -99,7 +99,7 @@ const runGeminiParsing = async ({ fileRaw, apiKey, rules, addLog, setSlides, set
 
   if (isPdf) {
     const fullText = slideTexts.map((t, i) => `=== Halaman ${i + 1} ===\n${t}`).join('\n\n');
-    addLog({ t: ts(), k: "info", tag: "AI", body: `Mengirim ${slideTexts.length} halaman PDF ke Gemini 1.5 Flash…` });
+    addLog({ t: ts(), k: "info", tag: "AI", body: `Mengirim ${slideTexts.length} halaman PDF ke Gemini 2.0 Flash…` });
     prompt = `${systemPrompt}
 
 Berikut adalah teks lengkap liturgi dari PDF (${slideTexts.length} halaman).
@@ -113,7 +113,7 @@ ${fullText}
 Output hanya JSON array:`;
   } else {
     const slideInput = slideTexts.map((t, i) => `--- Slide ${i + 1} ---\n${t}`).join('\n\n');
-    addLog({ t: ts(), k: "info", tag: "AI", body: `Mengirim ${slideTexts.length} slide ke Gemini 1.5 Flash…` });
+    addLog({ t: ts(), k: "info", tag: "AI", body: `Mengirim ${slideTexts.length} slide ke Gemini 2.0 Flash…` });
     prompt = `${systemPrompt}
 
 Berikut adalah ${slideTexts.length} slide liturgi dari PPTX:
@@ -386,7 +386,7 @@ const PageSettings = ({ go, lang, providers, setProviders, activeProvider, setAc
                 <div className="row gap-3" style={{ marginBottom: 10 }}>
                   <div style={{ width: 32, height: 32, borderRadius: 8, background: "#1a73e8", color: "#fff", display: "grid", placeItems: "center", fontSize: 11, fontWeight: 700, fontFamily: "Geist Mono", flexShrink: 0 }}>GG</div>
                   <div>
-                    <div style={{ fontWeight: 600, fontSize: 14 }}>Google Gemini 1.5 Flash — {t("Gratis", "Free")}</div>
+                    <div style={{ fontWeight: 600, fontSize: 14 }}>Google Gemini 2.0 Flash — {t("Gratis", "Free")}</div>
                     <div style={{ fontSize: 12, color: "var(--muted)" }}>{t("Dapatkan API key gratis di", "Get a free API key at")} <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style={{ color: "var(--green-2)", fontFamily: "Geist Mono", fontSize: 11 }}>aistudio.google.com/apikey</a></div>
                   </div>
                   {apiKeys?.gemini && <span className="chip green dot" style={{ marginLeft: "auto" }}>{t("Tersimpan", "Saved")}</span>}
@@ -644,7 +644,7 @@ const PageUpload = ({ go, lang, file, setFile }) => {
             <div style={{ display: "inline-flex", gap: 6, marginTop: 18 }}>
               <span className="chip">{t("Ekstrak lokal", "Local extract")}</span>
               <span className="chip">JSZip + PDF.js</span>
-              <span className="chip green dot">Gemini 1.5 Flash</span>
+              <span className="chip green dot">Gemini 2.0 Flash</span>
             </div>
           </div>
 
@@ -806,7 +806,7 @@ const PageParse = ({ go, lang, file, slides, setSlides, apiKeys, activeProvider,
           </h1>
           <div className="h-sub">
             {isRealMode
-              ? t("JSZip (PPTX) atau PDF.js (PDF) mengekstrak teks di browser; Gemini 1.5 Flash mengklasifikasi ke 8 kategori liturgi.", "JSZip (PPTX) or PDF.js (PDF) extracts text in browser; Gemini 1.5 Flash classifies into 8 liturgy categories.")
+              ? t("JSZip (PPTX) atau PDF.js (PDF) mengekstrak teks di browser; Gemini 2.0 Flash mengklasifikasi ke 8 kategori liturgi.", "JSZip (PPTX) or PDF.js (PDF) extracts text in browser; Gemini 2.0 Flash classifies into 8 liturgy categories.")
               : t("Mode demo — tidak ada file nyata atau API key Gemini. Masuk Settings untuk menghubungkan Gemini.", "Demo mode — no real file or Gemini API key. Go to Settings to connect Gemini.")}
           </div>
         </div>
@@ -871,7 +871,7 @@ const PageParse = ({ go, lang, file, slides, setSlides, apiKeys, activeProvider,
         <div>
           <div className="row" style={{ marginBottom: 8, justifyContent: "space-between" }}>
             <div className="label">{t("Log proses", "Process log")}</div>
-            <span className="chip">{isRealMode ? "Gemini 1.5 Flash · free tier" : t("Demo · simulasi", "Demo · simulated")}</span>
+            <span className="chip">{isRealMode ? "Gemini 2.0 Flash · free tier" : t("Demo · simulasi", "Demo · simulated")}</span>
           </div>
           <div className="log">
             {displayLog.map((l, i) => (
