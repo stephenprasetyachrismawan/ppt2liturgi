@@ -16,10 +16,35 @@ const App = () => {
 
   const [customPreset, setCustomPreset] = useState(null);
   const [extraPresets, setExtraPresets] = useState([]);
-  const [activeProvider, setActiveProvider] = useState("openai");
+  const [activeProvider, setActiveProvider] = useState("gemini");
   const [providers, setProviders] = useState(window.PROVIDERS);
   const [rules, setRules] = useState(window.PROMPT_RULES);
   const [showSlideshow, setShowSlideshow] = useState(false);
+
+  // API keys persisted to localStorage
+  const [apiKeys, setApiKeys] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('lts_apikeys') || '{}'); }
+    catch { return {}; }
+  });
+
+  // Sync provider connected status from stored keys on mount
+  useEffect(() => {
+    if (Object.keys(apiKeys).length > 0) {
+      setProviders(ps => ps.map(p => ({
+        ...p,
+        connected: apiKeys[p.id] ? true : p.connected,
+      })));
+    }
+  }, []);
+
+  const saveApiKey = (providerId, key) => {
+    const next = { ...apiKeys, [providerId]: key };
+    setApiKeys(next);
+    try { localStorage.setItem('lts_apikeys', JSON.stringify(next)); } catch {}
+    setProviders(ps => ps.map(p =>
+      p.id === providerId ? { ...p, connected: !!key.trim() } : p
+    ));
+  };
 
   // expose slideshow trigger globally
   useEffect(() => {
@@ -29,6 +54,8 @@ const App = () => {
   const t = (a, b) => lang === "id" ? a : b;
 
   const allPresets = [...window.PRESETS, ...extraPresets];
+  const safePresetIndex = Math.min(allPresets.length - 1, Math.max(0, presetIndex));
+  const preset = customPreset || allPresets[safePresetIndex];
 
   const steps = [
     { k: "welcome", n: "—", label: t("Beranda", "Home"), enabled: true },
@@ -38,9 +65,6 @@ const App = () => {
     { k: "editor", n: "04", label: "Editor", enabled: slides.length > 0 },
     { k: "export", n: "05", label: "Export", enabled: slides.length > 0 },
   ];
-
-  const safePresetIndex = Math.min(allPresets.length - 1, Math.max(0, presetIndex));
-  const preset = customPreset || allPresets[safePresetIndex];
 
   const savePreset = (name) => {
     if (!customPreset) return;
@@ -89,9 +113,9 @@ const App = () => {
       </div>
 
       {page === "welcome" && <window.PageWelcome go={setPage} lang={lang} />}
-      {page === "settings" && <window.PageSettings go={setPage} lang={lang} providers={providers} setProviders={setProviders} activeProvider={activeProvider} setActiveProvider={setActiveProvider} rules={rules} setRules={setRules} />}
+      {page === "settings" && <window.PageSettings go={setPage} lang={lang} providers={providers} setProviders={setProviders} activeProvider={activeProvider} setActiveProvider={setActiveProvider} rules={rules} setRules={setRules} apiKeys={apiKeys} saveApiKey={saveApiKey} />}
       {page === "upload" && <window.PageUpload go={setPage} lang={lang} file={file} setFile={setFile} />}
-      {page === "parse" && <window.PageParse go={setPage} lang={lang} file={file} slides={slides} setSlides={setSlides} />}
+      {page === "parse" && <window.PageParse go={setPage} lang={lang} file={file} slides={slides} setSlides={setSlides} apiKeys={apiKeys} activeProvider={activeProvider} rules={rules} />}
       {page === "editor" && <window.PageEditor go={setPage} lang={lang} slides={slides} setSlides={setSlides} presetIndex={safePresetIndex} setPresetIndex={setPresetIndex} customPreset={customPreset} setCustomPreset={setCustomPreset} allPresets={allPresets} savePreset={savePreset} />}
       {page === "export" && <window.PageExport go={setPage} lang={lang} slides={slides} presetIndex={safePresetIndex} customPreset={customPreset} allPresets={allPresets} />}
 

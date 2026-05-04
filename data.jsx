@@ -89,8 +89,8 @@ const PRESETS = [
 const PROVIDERS = [
   { id: "openai", name: "OpenAI", model: "gpt-4o", logo: "AI", bg: "#10a37f", connected: true, recommended: true, note: "Vision + cepat" },
   { id: "anthropic", name: "Anthropic Claude", model: "claude-sonnet-4.5", logo: "AN", bg: "#d97757", connected: false, note: "Konteks panjang, parsing rapi" },
-  { id: "gemini", name: "Google Gemini", model: "gemini-2.5-pro", logo: "GG", bg: "#1a73e8", connected: false, note: "Multimodal, kuota gratis" },
-  { id: "ollama", name: "Local Ollama", model: "llama3.1:8b", logo: "OL", bg: "#0c0a09", connected: true, note: "Offline, privat" },
+  { id: "gemini", name: "Google Gemini", model: "gemini-1.5-flash", logo: "GG", bg: "#1a73e8", connected: false, recommended: false, note: "Gratis via AI Studio · kuota cukup" },
+  { id: "ollama", name: "Local Ollama", model: "llama3.1:8b", logo: "OL", bg: "#0c0a09", connected: false, note: "Offline, privat" },
 ];
 
 const PROMPT_RULES = [
