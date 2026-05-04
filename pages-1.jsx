@@ -1,5 +1,124 @@
 // Pages 1: Welcome, Settings, Upload, Parse
 
+// ── PPTX text extraction (runs in browser via JSZip) ─────────────────────────
+const extractTextFromPptxXml = (xml) => {
+  const paragraphs = [];
+  const paras = xml.match(/<a:p[\s>][\s\S]*?<\/a:p>/g) || [];
+  for (const para of paras) {
+    const runs = [];
+    const tMatches = para.matchAll(/<a:t[^>]*>([^<]*)<\/a:t>/g);
+    for (const m of tMatches) { if (m[1]) runs.push(m[1]); }
+    const line = runs.join('').trim();
+    if (line) paragraphs.push(line);
+  }
+  return paragraphs.join('\n');
+};
+
+// ── Real Gemini parse pipeline ────────────────────────────────────────────────
+const runGeminiParsing = async ({ fileRaw, apiKey, rules, addLog, setSlides, setStep }) => {
+  const parseStart = Date.now();
+  const ts = () => {
+    const ms = Date.now() - parseStart;
+    const s = Math.floor(ms / 1000);
+    const c = String(Math.floor((ms % 1000) / 10)).padStart(2, '0');
+    return `0${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}.${c}`;
+  };
+
+  // Step 1: extract PPTX text
+  addLog({ t: ts(), k: "info", tag: "EXTRACT", body: "Membaca PPTX dengan JSZip…" });
+  let slideTexts = [];
+  try {
+    const zip = await window.JSZip.loadAsync(fileRaw);
+    const names = Object.keys(zip.files)
+      .filter(n => /^ppt\/slides\/slide\d+\.xml$/.test(n))
+      .sort((a, b) => parseInt(a.match(/\d+/)[0]) - parseInt(b.match(/\d+/)[0]));
+
+    for (const name of names) {
+      const xml = await zip.files[name].async('text');
+      const text = extractTextFromPptxXml(xml);
+      if (text.trim()) slideTexts.push(text);
+    }
+    addLog({ t: ts(), k: "ok", tag: "EXTRACT", body: `${slideTexts.length} slide dengan teks berhasil diekstrak dari ${names.length} total` });
+  } catch (e) {
+    addLog({ t: ts(), k: "warn", tag: "EXTRACT", body: `Gagal baca PPTX: ${e.message} — fallback ke data demo` });
+    setSlides(window.SAMPLE_SLIDES);
+    setStep(1);
+    return;
+  }
+
+  if (slideTexts.length === 0) {
+    addLog({ t: ts(), k: "warn", tag: "EXTRACT", body: "Tidak ada teks ditemukan (mungkin slide berisi gambar saja) — fallback ke data demo" });
+    setSlides(window.SAMPLE_SLIDES);
+    setStep(1);
+    return;
+  }
+
+  // Step 2: send to Gemini
+  addLog({ t: ts(), k: "info", tag: "AI", body: `Mengirim ${slideTexts.length} slide ke Gemini 1.5 Flash…` });
+  try {
+    const systemPrompt = rules.map(r => `[${r.k}] ${r.body}`).join('\n');
+    const slideInput = slideTexts.map((t, i) => `--- Slide ${i + 1} ---\n${t}`).join('\n\n');
+    const prompt = `${systemPrompt}\n\nBerikut adalah ${slideTexts.length} slide liturgi:\n\n${slideInput}\n\nKeluarkan hanya JSON array sesuai schema di atas:`;
+
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.2, responseMimeType: 'application/json' },
+        }),
+      }
+    );
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error?.message || `HTTP ${res.status}`);
+    }
+
+    const data = await res.json();
+    const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
+    addLog({ t: ts(), k: "info", tag: "AI", body: "Response diterima — memvalidasi schema JSON…" });
+
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonText);
+    } catch {
+      const m = jsonText.match(/\[[\s\S]*\]/);
+      if (m) parsed = JSON.parse(m[0]);
+      else throw new Error("JSON tidak valid dari Gemini");
+    }
+
+    const arr = Array.isArray(parsed) ? parsed : (parsed.slides || []);
+    const validTypes = Object.keys(window.SLIDE_TYPES);
+    const result = arr.map((s, i) => ({
+      id: i + 1,
+      type: validTypes.includes(s.type) ? s.type : 'verse',
+      title: s.title || `Slide ${i + 1}`,
+      subtitle: s.subtitle || '',
+      body: s.body || '',
+      ref: s.ref || '',
+      needs_split: s.needs_split || false,
+      language: s.language || 'id',
+    }));
+
+    const splitCount = result.filter(s => s.needs_split).length;
+    if (splitCount > 0) addLog({ t: ts(), k: "warn", tag: "AI", body: `${splitCount} slide bertanda needs_split: true — dapat dipecah di editor` });
+
+    addLog({ t: ts(), k: "ok", tag: "PARSE", body: `${result.length} slide subtitle dihasilkan dari ${slideTexts.length} slide input` });
+    const tokEst = Math.round(prompt.length / 4);
+    addLog({ t: ts(), k: "ok", tag: "DONE", body: `Selesai — perkiraan ${tokEst.toLocaleString()} token (~gratis dengan API key AI Studio)` });
+
+    setSlides(result);
+    setStep(1);
+  } catch (e) {
+    addLog({ t: ts(), k: "warn", tag: "AI", body: `Error Gemini: ${e.message} — fallback ke data demo` });
+    setSlides(window.SAMPLE_SLIDES);
+    setStep(1);
+  }
+};
+
 const SubtitleRender = ({ slide, preset, scale = 1 }) => {
   const text = preset.upper ? slide.body.toUpperCase() : slide.body;
   const fs = preset.size * scale;
@@ -8,7 +127,6 @@ const SubtitleRender = ({ slide, preset, scale = 1 }) => {
   const alignItems = valign === "bottom" ? "flex-end" : valign === "top" ? "flex-start" : "center";
   const padding = valign === "bottom" ? `${fs * 0.6}px 8% ${fs * 1.2}px` : valign === "top" ? `${fs * 1.2}px 8% ${fs * 0.6}px` : `0 8%`;
 
-  // Compute effective shadow from shadowColor + shadowOpacity (overrides preset.shadow.color)
   const sOpacity = preset.shadowOpacity != null ? preset.shadowOpacity : 0.65;
   const sCol = preset.shadowColor || "#000000";
   const hex2rgba = (h, a) => {
@@ -19,7 +137,6 @@ const SubtitleRender = ({ slide, preset, scale = 1 }) => {
   const shadowRgba = sCol.startsWith("#") ? hex2rgba(sCol, sOpacity) : sCol;
   const glowRgba = sCol.startsWith("#") ? hex2rgba(sCol, Math.min(1, sOpacity + 0.1)) : sCol;
   const noShadow = sOpacity === 0 || preset.shadow.color === "transparent";
-  // Outline thickness: replicate shadow at 8 directions for a stroke effect
   const thick = preset.shadowThick != null ? preset.shadowThick : 1;
   const outline = thick > 0 ? [
     `${thick}px 0 0 ${shadowRgba}`,
@@ -103,7 +220,7 @@ const PageWelcome = ({ go, lang }) => {
             <div className="stat"><div className="k">{t("Format input", "Input")}</div><div className="v">.pptx</div></div>
             <div className="stat"><div className="k">{t("Background", "Bg")}</div><div className="v" style={{ color: "#00B140" }}>#00B140</div></div>
             <div className="stat"><div className="k">{t("Output", "Output")}</div><div className="v">.pptx</div></div>
-            <div className="stat"><div className="k">{t("Engine", "Engine")}</div><div className="v">PptxGenJS</div></div>
+            <div className="stat"><div className="k">{t("Engine", "Engine")}</div><div className="v">Gemini</div></div>
           </div>
         </div>
 
@@ -127,9 +244,9 @@ const PageWelcome = ({ go, lang }) => {
         <div className="h-eyebrow">{t("Alur 4 langkah", "4-step flow")}</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginTop: 12 }}>
           {[
-            { n: "01", k: "settings", icon: "settings", title: t("Setting AI", "AI Setup"), desc: t("Pilih provider, masukkan API key, atur prompt rules.", "Pick provider, enter API key, define prompt rules.") },
+            { n: "01", k: "settings", icon: "settings", title: t("Setting AI", "AI Setup"), desc: t("Masukkan API key Gemini (gratis dari AI Studio).", "Enter your Gemini API key (free from AI Studio).") },
             { n: "02", k: "upload", icon: "upload", title: t("Upload PPT", "Upload PPT"), desc: t("Drag-drop file liturgi mingguan dari gereja.", "Drag-drop your weekly liturgy file.") },
-            { n: "03", k: "parse", icon: "sparkle", title: t("AI Parse", "AI Parse"), desc: t("OCR + LLM mengkategorikan & memecah slide.", "OCR + LLM classifies & splits slides.") },
+            { n: "03", k: "parse", icon: "sparkle", title: t("AI Parse", "AI Parse"), desc: t("Gemini mengkategorikan & memecah slide liturgi.", "Gemini classifies & splits liturgy slides.") },
             { n: "04", k: "editor", icon: "edit", title: t("Edit & Export", "Edit & Export"), desc: t("Sesuaikan visual, lalu ekspor PPT chroma key.", "Style visuals, then export chroma key PPT.") },
           ].map((s, i) => (
             <button key={i} className="card" style={{ padding: 18, textAlign: "left", border: "1px solid var(--line)", cursor: "pointer", background: "#fff" }} onClick={() => go(s.k)}>
@@ -150,12 +267,13 @@ const PageWelcome = ({ go, lang }) => {
 // ============================================================
 // SETTINGS
 // ============================================================
-const PageSettings = ({ go, lang, providers, setProviders, activeProvider, setActiveProvider, rules, setRules }) => {
+const PageSettings = ({ go, lang, providers, setProviders, activeProvider, setActiveProvider, rules, setRules, apiKeys, saveApiKey }) => {
   const t = (a, b) => lang === "id" ? a : b;
   const [section, setSection] = React.useState("ai");
-  const [editingRule, setEditingRule] = React.useState(null); // { idx: number, k: string, body: string } | "new"
+  const [editingRule, setEditingRule] = React.useState(null);
   const [newRuleKey, setNewRuleKey] = React.useState("");
   const [newRuleBody, setNewRuleBody] = React.useState("");
+
   const sections = [
     { k: "ai", icon: "sparkle", label: t("AI Provider", "AI Provider") },
     { k: "rules", icon: "key", label: t("Prompt Rules", "Prompt Rules") },
@@ -171,8 +289,8 @@ const PageSettings = ({ go, lang, providers, setProviders, activeProvider, setAc
           <div className="h-eyebrow">01 / {t("Pengaturan", "Settings")}</div>
           <h1 className="h-title">{t("Atur AI & aturan parsing", "Configure AI & parsing rules")}</h1>
           <div className="h-sub">{t(
-            "Sambungkan minimal satu provider AI dan tinjau prompt rules yang akan digunakan untuk membaca slide liturgi Anda.",
-            "Connect at least one AI provider and review the prompt rules used to read your liturgy slides."
+            "Masukkan API key Gemini (gratis dari Google AI Studio) lalu tinjau prompt rules yang digunakan untuk membaca slide liturgi Anda.",
+            "Enter your Gemini API key (free from Google AI Studio) and review the prompt rules used to read your liturgy slides."
           )}</div>
         </div>
         <button className="btn primary" onClick={() => go("upload")}>{t("Lanjut: Upload", "Next: Upload")} <Icon name="arrowR" size={14} /></button>
@@ -195,9 +313,32 @@ const PageSettings = ({ go, lang, providers, setProviders, activeProvider, setAc
         <div className="card">
           {section === "ai" && (
             <>
+              {/* Gemini quick-setup banner */}
+              <div className="section" style={{ background: "var(--green-soft-2)", borderColor: "#bbf7d0" }}>
+                <div className="row gap-3" style={{ marginBottom: 10 }}>
+                  <div style={{ width: 32, height: 32, borderRadius: 8, background: "#1a73e8", color: "#fff", display: "grid", placeItems: "center", fontSize: 11, fontWeight: 700, fontFamily: "Geist Mono", flexShrink: 0 }}>GG</div>
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 14 }}>Google Gemini 1.5 Flash — {t("Gratis", "Free")}</div>
+                    <div style={{ fontSize: 12, color: "var(--muted)" }}>{t("Dapatkan API key gratis di", "Get a free API key at")} <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style={{ color: "var(--green-2)", fontFamily: "Geist Mono", fontSize: 11 }}>aistudio.google.com/apikey</a></div>
+                  </div>
+                  {apiKeys?.gemini && <span className="chip green dot" style={{ marginLeft: "auto" }}>{t("Tersimpan", "Saved")}</span>}
+                </div>
+                <div className="colorrow">
+                  <Icon name="key" size={14} />
+                  <input
+                    className="input"
+                    type="password"
+                    placeholder="AIza…"
+                    value={apiKeys?.gemini || ""}
+                    onChange={e => saveApiKey("gemini", e.target.value)}
+                    style={{ fontFamily: "Geist Mono", fontSize: 12 }}
+                  />
+                </div>
+              </div>
+
               <div className="section">
-                <h3>{t("Pilih provider aktif", "Active provider")}</h3>
-                <div className="desc">{t("Provider yang dipilih akan digunakan untuk parsing & OCR. Kunci API disimpan lokal di browser.", "The selected provider will run parsing & OCR. API keys are stored locally in your browser.")}</div>
+                <h3>{t("Semua provider", "All providers")}</h3>
+                <div className="desc">{t("Provider yang dipilih akan digunakan untuk parsing. API key disimpan di localStorage browser Anda.", "The active provider runs parsing. API keys are stored in your browser's localStorage.")}</div>
                 <div className="provider-grid">
                   {providers.map(p => (
                     <div key={p.id} className={"provider " + (activeProvider === p.id ? "active" : "")} onClick={() => setActiveProvider(p.id)}>
@@ -213,7 +354,14 @@ const PageSettings = ({ go, lang, providers, setProviders, activeProvider, setAc
                       <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 10 }}>{p.note}</div>
                       <div className="colorrow">
                         <Icon name="key" size={12} />
-                        <input className="input" defaultValue={p.connected ? "sk-•••••••••••••••a91f" : ""} placeholder={t("API Key…", "API Key…")} onClick={e => e.stopPropagation()} />
+                        <input
+                          className="input"
+                          type="password"
+                          placeholder={t("API Key…", "API Key…")}
+                          value={apiKeys?.[p.id] || ""}
+                          onChange={e => saveApiKey(p.id, e.target.value)}
+                          onClick={e => e.stopPropagation()}
+                        />
                       </div>
                     </div>
                   ))}
@@ -252,8 +400,8 @@ const PageSettings = ({ go, lang, providers, setProviders, activeProvider, setAc
               <div className="section">
                 <h3>{t("System Prompt — terstruktur", "System Prompt — structured")}</h3>
                 <div className="desc">{t(
-                  "Setiap aturan dibatasi dan dapat dinonaktifkan. AI hanya boleh keluaran JSON sesuai schema; tidak boleh menerjemahkan, menambah konten, atau menafsir teologis.",
-                  "Each rule is scoped and toggleable. The AI may only output JSON matching the schema; it cannot translate, add content, or interpret theology."
+                  "Setiap aturan dibatasi dan dapat diedit. AI hanya boleh keluaran JSON sesuai schema; tidak boleh menerjemahkan, menambah konten, atau menafsir teologis.",
+                  "Each rule is scoped and editable. The AI may only output JSON matching the schema; it cannot translate, add content, or interpret theology."
                 )}</div>
                 <div className="col gap-2">
                   {rules.map((r, i) => (
@@ -315,7 +463,7 @@ const PageSettings = ({ go, lang, providers, setProviders, activeProvider, setAc
               </div>
               <div className="section">
                 <h3>{t("Schema output JSON", "JSON output schema")}</h3>
-                <div className="desc">{t("AI dipaksa mengikuti schema ini. Field tambahan di luar daftar akan dibuang.", "The AI must follow this schema. Fields outside this list are discarded.")}</div>
+                <div className="desc">{t("Gemini dipaksa mengikuti schema ini.", "Gemini must follow this schema.")}</div>
                 <pre className="log" style={{ maxHeight: 200 }}>{`{
   "slides": [
     {
@@ -339,7 +487,7 @@ const PageSettings = ({ go, lang, providers, setProviders, activeProvider, setAc
               <div className="desc">{t("Untuk slide yang berisi gambar/scan. Dijalankan sebelum LLM.", "Used for slides that contain images/scans. Runs before the LLM.")}</div>
               <div className="col gap-3">
                 <div className="rule-card"><span className="rk">TESSERACT</span><div className="rb">id+eng+jav language packs · confidence threshold 80%</div><span className="chip green dot">{t("aktif", "active")}</span></div>
-                <div className="rule-card"><span className="rk">VISION</span><div className="rb">{t("Fallback ke GPT-4o Vision jika confidence <80%", "Fallback to GPT-4o Vision when confidence <80%")}</div><span className="chip green dot">{t("aktif", "active")}</span></div>
+                <div className="rule-card"><span className="rk">VISION</span><div className="rb">{t("Fallback ke Gemini Vision jika confidence <80%", "Fallback to Gemini Vision when confidence <80%")}</div><span className="chip green dot">{t("aktif", "active")}</span></div>
                 <div className="rule-card"><span className="rk">PREPROC</span><div className="rb">{t("Auto-deskew, kontras +10, hilangkan watermark gereja", "Auto-deskew, +10 contrast, strip church watermark")}</div></div>
               </div>
             </div>
@@ -379,6 +527,21 @@ const PageSettings = ({ go, lang, providers, setProviders, activeProvider, setAc
 const PageUpload = ({ go, lang, file, setFile }) => {
   const t = (a, b) => lang === "id" ? a : b;
   const [over, setOver] = React.useState(false);
+  const inputRef = React.useRef(null);
+
+  const handleRealFile = (f) => {
+    if (!f) return;
+    const ext = f.name.split('.').pop().toLowerCase();
+    if (!['pptx', 'ppt', 'pdf'].includes(ext)) return;
+    setFile({
+      name: f.name,
+      size: (f.size / 1024 / 1024).toFixed(1) + ' MB',
+      slides: '?',
+      modified: new Date(f.lastModified).toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' }),
+      _raw: f,
+    });
+  };
+
   const fakeUpload = () => setFile({ name: "Liturgi Minggu 04 Mei 2026.pptx", size: "2.4 MB", slides: 14, modified: "04 Mei 2026 · 09:14" });
 
   return (
@@ -387,25 +550,29 @@ const PageUpload = ({ go, lang, file, setFile }) => {
         <div>
           <div className="h-eyebrow">02 / Upload</div>
           <h1 className="h-title">{t("Unggah liturgi mingguan", "Upload weekly liturgy")}</h1>
-          <div className="h-sub">{t("Format yang didukung: .pptx, .ppt, .pdf. File diproses secara lokal di browser; tidak diunggah ke server.", "Supported: .pptx, .ppt, .pdf. Files are processed locally in your browser, not uploaded to a server.")}</div>
+          <div className="h-sub">{t("Format yang didukung: .pptx, .ppt. Teks diekstrak di browser dengan JSZip — file tidak pernah meninggalkan perangkat Anda.", "Supported: .pptx, .ppt. Text is extracted in your browser with JSZip — the file never leaves your device.")}</div>
         </div>
         <button className="btn" disabled={!file} onClick={() => go("parse")}>{t("Lanjut: Parse", "Next: Parse")} <Icon name="arrowR" size={14} /></button>
       </div>
+
+      {/* hidden file input */}
+      <input ref={inputRef} type="file" accept=".pptx,.ppt,.pdf" style={{ display: "none" }}
+             onChange={e => handleRealFile(e.target.files?.[0])} />
 
       <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 24, alignItems: "start" }}>
         <div>
           <div className={"drop " + (over ? "over" : "")}
                onDragOver={e => { e.preventDefault(); setOver(true); }}
                onDragLeave={() => setOver(false)}
-               onDrop={e => { e.preventDefault(); setOver(false); fakeUpload(); }}
-               onClick={fakeUpload}>
+               onDrop={e => { e.preventDefault(); setOver(false); handleRealFile(e.dataTransfer.files[0]); }}
+               onClick={() => inputRef.current?.click()}>
             <div className="ic"><Icon name="upload" size={22} /></div>
             <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 4 }}>{t("Tarik file ke sini, atau klik untuk pilih", "Drop a file here, or click to choose")}</div>
-            <div style={{ fontSize: 13, color: "var(--muted)" }}>.pptx · .ppt · .pdf — {t("maks 50 MB", "max 50 MB")}</div>
+            <div style={{ fontSize: 13, color: "var(--muted)" }}>.pptx · .ppt — {t("maks 50 MB", "max 50 MB")}</div>
             <div style={{ display: "inline-flex", gap: 6, marginTop: 18 }}>
-              <span className="chip">{t("AI siap", "AI ready")}</span>
-              <span className="chip">OCR id+jav</span>
-              <span className="chip green dot">GPT-4o</span>
+              <span className="chip">{t("Teks diekstrak lokal", "Local text extract")}</span>
+              <span className="chip">JSZip</span>
+              <span className="chip green dot">Gemini 1.5 Flash</span>
             </div>
           </div>
 
@@ -416,16 +583,18 @@ const PageUpload = ({ go, lang, file, setFile }) => {
                 <div className="file-icon">PPTX</div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 600, fontSize: 14 }}>{file.name}</div>
-                  <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "Geist Mono", marginTop: 2 }}>{file.size} · {file.slides} slides · {file.modified}</div>
+                  <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "Geist Mono", marginTop: 2 }}>
+                    {file.size} · {file.slides !== '?' ? `${file.slides} slides` : t("menghitung…", "counting…")} · {file.modified}
+                  </div>
                 </div>
                 <button className="btn sm" onClick={() => setFile(null)}><Icon name="x" size={12} /></button>
                 <button className="btn sm primary" onClick={() => go("parse")}><Icon name="sparkle" size={12} /> {t("Parse", "Parse")}</button>
               </div>
               <div style={{ marginTop: 10, display: "flex", gap: 6, flexWrap: "wrap" }}>
-                <span className="chip">14 slides</span>
-                <span className="chip">2 {t("gambar", "images")}</span>
-                <span className="chip">{t("font: Calibri, Times New Roman", "fonts: Calibri, Times New Roman")}</span>
-                <span className="chip warn dot">{t("2 slide butuh OCR", "2 slides need OCR")}</span>
+                {file._raw
+                  ? <span className="chip green dot">{t("File nyata — akan diparse Gemini", "Real file — Gemini will parse")}</span>
+                  : <span className="chip warn dot">{t("File demo — hasil simulasi", "Demo file — simulated result")}</span>
+                }
               </div>
             </div>
           )}
@@ -495,32 +664,58 @@ const PageUpload = ({ go, lang, file, setFile }) => {
 // ============================================================
 // PARSE
 // ============================================================
-const PageParse = ({ go, lang, file, slides, setSlides }) => {
+const PageParse = ({ go, lang, file, slides, setSlides, apiKeys, activeProvider, rules }) => {
   const t = (a, b) => lang === "id" ? a : b;
-  const [step, setStep] = React.useState(0); // 0=running, 1=done
+  const [step, setStep] = React.useState(0);
   const [logIdx, setLogIdx] = React.useState(0);
+  const [realLog, setRealLog] = React.useState([]);
+  const parseStarted = React.useRef(false);
+
+  const geminiKey = apiKeys?.gemini;
+  const hasRealFile = file?._raw instanceof File;
+  const isRealMode = hasRealFile && !!geminiKey;
+
+  const addLog = React.useCallback((entry) => setRealLog(l => [...l, entry]), []);
+
+  // Real Gemini parsing
+  React.useEffect(() => {
+    if (!isRealMode || parseStarted.current) return;
+    parseStarted.current = true;
+    runGeminiParsing({ fileRaw: file._raw, apiKey: geminiKey, rules: rules || window.PROMPT_RULES, addLog, setSlides, setStep });
+  }, []);
+
+  // Demo animation (when no real file or no API key)
+  React.useEffect(() => {
+    if (isRealMode) return;
+    if (logIdx >= window.PARSE_LOG.length) { setStep(1); return; }
+    const timer = setTimeout(() => setLogIdx(i => i + 1), 280 + Math.random() * 200);
+    return () => clearTimeout(timer);
+  }, [logIdx, isRealMode]);
 
   React.useEffect(() => {
-    if (logIdx >= window.PARSE_LOG.length) { setStep(1); return; }
-    const t = setTimeout(() => setLogIdx(i => i + 1), 280 + Math.random() * 200);
-    return () => clearTimeout(t);
-  }, [logIdx]);
+    if (step === 1 && slides.length === 0) setSlides(window.SAMPLE_SLIDES);
+  }, [step]);
 
-  React.useEffect(() => { if (step === 1 && slides.length === 0) setSlides(window.SAMPLE_SLIDES); }, [step]);
+  const displayLog = isRealMode ? realLog : window.PARSE_LOG.slice(0, logIdx);
 
   const stages = [
-    { k: "extract", label: t("Ekstrak teks & gambar", "Extract text & images"), n: 1 },
-    { k: "ocr", label: "OCR (id+eng+jav)", n: 2 },
-    { k: "ai", label: t("AI klasifikasi & split", "AI classify & split"), n: 3 },
-    { k: "schema", label: t("Validasi schema JSON", "Validate JSON schema"), n: 4 },
+    { k: "extract", label: t("Ekstrak teks dari PPTX", "Extract text from PPTX"), n: 1 },
+    { k: "ai", label: t("Gemini klasifikasi & split", "Gemini classify & split"), n: 2 },
+    { k: "schema", label: t("Validasi schema JSON", "Validate JSON schema"), n: 3 },
+    { k: "done", label: t("Slide siap diedit", "Slides ready to edit"), n: 4 },
   ];
 
   const stageDone = (i) => {
     if (step === 1) return true;
+    if (isRealMode) {
+      if (i === 0) return realLog.some(l => l.tag === "EXTRACT" && l.k === "ok");
+      if (i === 1) return realLog.some(l => l.tag === "AI" && l.body.startsWith("Response"));
+      if (i === 2) return realLog.some(l => l.tag === "PARSE");
+      return false;
+    }
     if (i === 0) return logIdx >= 2;
-    if (i === 1) return logIdx >= 4;
-    if (i === 2) return logIdx >= 8;
-    if (i === 3) return logIdx >= 10;
+    if (i === 1) return logIdx >= 8;
+    if (i === 2) return logIdx >= 9;
     return false;
   };
   const stageActive = (i) => !stageDone(i) && (i === 0 || stageDone(i - 1));
@@ -530,11 +725,16 @@ const PageParse = ({ go, lang, file, slides, setSlides }) => {
       <div className="page-header">
         <div>
           <div className="h-eyebrow">03 / {t("Parsing", "Parsing")}</div>
-          <h1 className="h-title">{step === 0 ? t("AI sedang membaca slide…", "AI is reading the slides…") : t("Parsing selesai", "Parsing complete")}</h1>
-          <div className="h-sub">{t(
-            "OCR mengekstrak teks dari gambar; LLM mengklasifikasi tiap slide ke 8 kategori liturgi dan memecah lirik bait demi bait.",
-            "OCR pulls text from images; the LLM classifies slides into 8 liturgy categories and splits hymns verse-by-verse."
-          )}</div>
+          <h1 className="h-title">
+            {step === 0
+              ? (isRealMode ? t("Gemini sedang membaca slide…", "Gemini is reading the slides…") : t("Simulasi parsing…", "Simulating parse…"))
+              : t("Parsing selesai", "Parsing complete")}
+          </h1>
+          <div className="h-sub">
+            {isRealMode
+              ? t("JSZip mengekstrak teks dari PPTX; Gemini 1.5 Flash mengklasifikasi tiap slide ke 8 kategori liturgi.", "JSZip extracts text from PPTX; Gemini 1.5 Flash classifies slides into 8 liturgy categories.")
+              : t("Mode demo — tidak ada file nyata atau API key Gemini. Masuk Settings untuk menghubungkan Gemini.", "Demo mode — no real file or Gemini API key. Go to Settings to connect Gemini.")}
+          </div>
         </div>
         <button className="btn primary" disabled={step !== 1} onClick={() => go("editor")}>
           {step === 1 ? t("Buka editor", "Open editor") : t("Menunggu…", "Working…")} <Icon name="arrowR" size={14} />
@@ -547,10 +747,14 @@ const PageParse = ({ go, lang, file, slides, setSlides }) => {
             <div className="file-icon" style={{ width: 32, height: 40 }}>PPTX</div>
             <div>
               <div style={{ fontWeight: 600, fontSize: 13 }}>{file?.name || "Liturgi Minggu 04 Mei 2026.pptx"}</div>
-              <div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "Geist Mono" }}>{file?.slides || 14} slides → 11 subtitle</div>
+              <div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "Geist Mono" }}>
+                {isRealMode ? t("File nyata · Gemini", "Real file · Gemini") : t("Demo · simulasi", "Demo · simulated")}
+              </div>
             </div>
             <div className="grow" />
-            <span className={"chip " + (step === 1 ? "green dot" : "warn dot")}>{step === 1 ? t("Selesai", "Done") : t("Sedang berjalan", "Running")}</span>
+            <span className={"chip " + (step === 1 ? "green dot" : "warn dot")}>
+              {step === 1 ? t("Selesai", "Done") : t("Sedang berjalan", "Running")}
+            </span>
           </div>
           <div className="divider" style={{ margin: "8px 0 16px" }} />
           <div className="col gap-3">
@@ -561,7 +765,6 @@ const PageParse = ({ go, lang, file, slides, setSlides }) => {
                 </div>
                 <div style={{ flex: 1, fontSize: 13, fontWeight: 500 }}>{s.label}</div>
                 {stageActive(i) && <span className="mono" style={{ fontSize: 11, color: "var(--green-2)" }}>•••</span>}
-                {stageDone(i) && <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{["1.2s", "1.0s", "2.8s", "0.5s"][i]}</span>}
               </div>
             ))}
           </div>
@@ -569,9 +772,9 @@ const PageParse = ({ go, lang, file, slides, setSlides }) => {
           <div className="divider" />
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 1, background: "var(--line)", border: "1px solid var(--line)", borderRadius: 10, overflow: "hidden" }}>
             {[
-              { k: "Slides parsed", v: step === 1 ? "11 / 14" : `${Math.min(11, Math.floor(logIdx * 1.3))} / 14` },
-              { k: "Tokens used", v: step === 1 ? "6,030" : `${Math.floor(logIdx * 600)}` },
-              { k: "Est. cost", v: step === 1 ? "$0.024" : "—" },
+              { k: "Mode", v: isRealMode ? "Gemini" : "Demo" },
+              { k: "Slides", v: step === 1 ? `${slides.length}` : "…" },
+              { k: "Est. cost", v: isRealMode ? "~$0" : "—" },
             ].map((x, i) => (
               <div key={i} style={{ padding: "10px 12px", background: "#fff" }}>
                 <div className="mono" style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".08em" }}>{x.k}</div>
@@ -579,15 +782,25 @@ const PageParse = ({ go, lang, file, slides, setSlides }) => {
               </div>
             ))}
           </div>
+
+          {!isRealMode && step !== 1 && (
+            <div style={{ marginTop: 12, padding: "10px 14px", background: "var(--warn-soft)", borderRadius: 8, border: "1px solid #fde68a", fontSize: 12, color: "var(--warn)", lineHeight: 1.5 }}>
+              {t("Tidak ada API key Gemini. ", "No Gemini API key. ")}
+              <span style={{ textDecoration: "underline", cursor: "pointer" }} onClick={() => go("settings")}>
+                {t("Buka Settings", "Open Settings")}
+              </span>
+              {t(" untuk menghubungkan.", " to connect.")}
+            </div>
+          )}
         </div>
 
         <div>
           <div className="row" style={{ marginBottom: 8, justifyContent: "space-between" }}>
             <div className="label">{t("Log proses", "Process log")}</div>
-            <span className="chip">GPT-4o · temperature 0.20</span>
+            <span className="chip">{isRealMode ? "Gemini 1.5 Flash · free tier" : t("Demo · simulasi", "Demo · simulated")}</span>
           </div>
           <div className="log">
-            {window.PARSE_LOG.slice(0, logIdx).map((l, i) => (
+            {displayLog.map((l, i) => (
               <div key={i}>
                 <span className="l-time">{l.t}</span>{"  "}
                 <span className={"l-" + l.k}>[{l.k.toUpperCase()}]</span>{"  "}
@@ -595,15 +808,15 @@ const PageParse = ({ go, lang, file, slides, setSlides }) => {
                 {l.body}
               </div>
             ))}
-            {step === 0 && <div><span className="l-time">{("00:0" + (logIdx * 0.4).toFixed(2)).slice(0, 8)}</span>{"  "}<span className="l-info">[…]</span> <span style={{ opacity: .6 }}>{t("memproses…", "processing…")}</span></div>}
+            {step === 0 && <div><span className="l-time">…</span>{"  "}<span className="l-info">[…]</span> <span style={{ opacity: .6 }}>{t("memproses…", "processing…")}</span></div>}
           </div>
 
           {step === 1 && (
             <div style={{ marginTop: 16 }}>
               <div className="label" style={{ marginBottom: 8 }}>{t("Pratinjau hasil parsing", "Parsed slides preview")}</div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
-                {window.SAMPLE_SLIDES.slice(0, 8).map(s => {
-                  const meta = window.SLIDE_TYPES[s.type];
+                {slides.slice(0, 8).map(s => {
+                  const meta = window.SLIDE_TYPES[s.type] || window.SLIDE_TYPES.verse;
                   return (
                     <div key={s.id} style={{ aspectRatio: "16/9", background: "var(--chroma)", borderRadius: 4, padding: 6, display: "grid", placeItems: "center", textAlign: "center", overflow: "hidden", position: "relative" }}>
                       <span style={{ position: "absolute", top: 4, left: 4, fontFamily: "Geist Mono", fontSize: 8, color: "#fff", background: meta.color, padding: "1px 4px", borderRadius: 2 }}>{meta.label}</span>
