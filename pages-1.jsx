@@ -153,6 +153,9 @@ const PageWelcome = ({ go, lang }) => {
 const PageSettings = ({ go, lang, providers, setProviders, activeProvider, setActiveProvider, rules, setRules }) => {
   const t = (a, b) => lang === "id" ? a : b;
   const [section, setSection] = React.useState("ai");
+  const [editingRule, setEditingRule] = React.useState(null); // { idx: number, k: string, body: string } | "new"
+  const [newRuleKey, setNewRuleKey] = React.useState("");
+  const [newRuleBody, setNewRuleBody] = React.useState("");
   const sections = [
     { k: "ai", icon: "sparkle", label: t("AI Provider", "AI Provider") },
     { k: "rules", icon: "key", label: t("Prompt Rules", "Prompt Rules") },
@@ -254,13 +257,60 @@ const PageSettings = ({ go, lang, providers, setProviders, activeProvider, setAc
                 )}</div>
                 <div className="col gap-2">
                   {rules.map((r, i) => (
-                    <div className="rule-card" key={r.k}>
-                      <span className="rk">{r.k}</span>
-                      <div className="rb">{r.body}</div>
-                      <button className="btn sm ghost"><Icon name="edit" size={12} /></button>
-                    </div>
+                    editingRule && editingRule.idx === i ? (
+                      <div className="rule-card col gap-2" key={r.k} style={{ padding: 14 }}>
+                        <div className="row gap-2">
+                          <input className="input mono" value={editingRule.k} style={{ maxWidth: 80, fontFamily: "Geist Mono", fontSize: 12, textTransform: "uppercase" }}
+                                 onChange={e => setEditingRule(er => ({ ...er, k: e.target.value.toUpperCase() }))} />
+                        </div>
+                        <textarea className="textarea" value={editingRule.body} rows={3}
+                                  onChange={e => setEditingRule(er => ({ ...er, body: e.target.value }))} />
+                        <div className="row gap-2">
+                          <button className="btn sm primary" onClick={() => {
+                            const next = rules.slice();
+                            next[i] = { k: editingRule.k, body: editingRule.body };
+                            setRules(next);
+                            setEditingRule(null);
+                          }}><Icon name="check" size={12} /> {t("Simpan", "Save")}</button>
+                          <button className="btn sm ghost" onClick={() => setEditingRule(null)}><Icon name="x" size={12} /></button>
+                          <button className="btn sm ghost danger" style={{ marginLeft: "auto", color: "var(--danger)" }} onClick={() => {
+                            setRules(rules.filter((_, ri) => ri !== i));
+                            setEditingRule(null);
+                          }}><Icon name="x" size={11} /> {t("Hapus", "Delete")}</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="rule-card" key={r.k}>
+                        <span className="rk">{r.k}</span>
+                        <div className="rb">{r.body}</div>
+                        <button className="btn sm ghost" onClick={() => setEditingRule({ idx: i, k: r.k, body: r.body })}><Icon name="edit" size={12} /></button>
+                      </div>
+                    )
                   ))}
-                  <button className="btn sm" style={{ alignSelf: "flex-start", marginTop: 4 }}><Icon name="plus" size={12} /> {t("Tambah aturan", "Add rule")}</button>
+
+                  {editingRule === "new" ? (
+                    <div className="rule-card col gap-2" style={{ padding: 14 }}>
+                      <input className="input" value={newRuleKey} placeholder={t("KUNCI_ATURAN", "RULE_KEY")}
+                             style={{ fontFamily: "Geist Mono", fontSize: 12, textTransform: "uppercase" }}
+                             onChange={e => setNewRuleKey(e.target.value.toUpperCase())} />
+                      <textarea className="textarea" value={newRuleBody} rows={3}
+                                placeholder={t("Deskripsi aturan…", "Rule description…")}
+                                onChange={e => setNewRuleBody(e.target.value)} />
+                      <div className="row gap-2">
+                        <button className="btn sm primary" disabled={!newRuleKey.trim() || !newRuleBody.trim()} onClick={() => {
+                          setRules([...rules, { k: newRuleKey.trim(), body: newRuleBody.trim() }]);
+                          setEditingRule(null);
+                          setNewRuleKey(""); setNewRuleBody("");
+                        }}><Icon name="check" size={12} /> {t("Tambah", "Add")}</button>
+                        <button className="btn sm ghost" onClick={() => { setEditingRule(null); setNewRuleKey(""); setNewRuleBody(""); }}><Icon name="x" size={12} /></button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button className="btn sm" style={{ alignSelf: "flex-start", marginTop: 4 }}
+                            onClick={() => setEditingRule("new")}>
+                      <Icon name="plus" size={12} /> {t("Tambah aturan", "Add rule")}
+                    </button>
+                  )}
                 </div>
               </div>
               <div className="section">
@@ -384,9 +434,9 @@ const PageUpload = ({ go, lang, file, setFile }) => {
             <div className="label" style={{ marginBottom: 10 }}>{t("Atau pilih dari riwayat", "Or pick from history")}</div>
             <div className="col gap-2">
               {[
-                { name: "Liturgi Minggu 27 April 2026.pptx", date: "27 Apr · GKI", slides: 12 },
-                { name: "Liturgi Jumat Agung 2026.pptx", date: "03 Apr · GKJ", slides: 18 },
-                { name: "Liturgi Paskah Subuh 2026.pptx", date: "05 Apr · GKJ", slides: 22 },
+                { name: "Liturgi Minggu 27 April 2026.pptx", date: "27 Apr · GKI", slides: 12, size: "1.8 MB", modified: "27 Apr 2026 · 08:45" },
+                { name: "Liturgi Jumat Agung 2026.pptx", date: "03 Apr · GKJ", slides: 18, size: "2.1 MB", modified: "03 Apr 2026 · 07:30" },
+                { name: "Liturgi Paskah Subuh 2026.pptx", date: "05 Apr · GKJ", slides: 22, size: "3.0 MB", modified: "05 Apr 2026 · 05:00" },
               ].map((h, i) => (
                 <div className="file-row" key={i} style={{ padding: "10px 14px" }}>
                   <Icon name="file" size={18} />
@@ -394,7 +444,10 @@ const PageUpload = ({ go, lang, file, setFile }) => {
                     <div style={{ fontSize: 13, fontWeight: 500 }}>{h.name}</div>
                     <div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "Geist Mono" }}>{h.date} · {h.slides} slides</div>
                   </div>
-                  <button className="btn sm ghost">{t("Buka", "Open")}</button>
+                  <button className="btn sm ghost" onClick={() => {
+                    setFile({ name: h.name, size: h.size, slides: h.slides, modified: h.modified });
+                    go("parse");
+                  }}>{t("Buka", "Open")}</button>
                 </div>
               ))}
             </div>
