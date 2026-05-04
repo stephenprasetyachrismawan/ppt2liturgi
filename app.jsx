@@ -15,6 +15,7 @@ const App = () => {
   const setPresetIndex = (i) => setTweak("presetIndex", i);
 
   const [customPreset, setCustomPreset] = useState(null);
+  const [extraPresets, setExtraPresets] = useState([]);
   const [activeProvider, setActiveProvider] = useState("openai");
   const [providers, setProviders] = useState(window.PROVIDERS);
   const [rules, setRules] = useState(window.PROMPT_RULES);
@@ -27,6 +28,8 @@ const App = () => {
 
   const t = (a, b) => lang === "id" ? a : b;
 
+  const allPresets = [...window.PRESETS, ...extraPresets];
+
   const steps = [
     { k: "welcome", n: "—", label: t("Beranda", "Home"), enabled: true },
     { k: "settings", n: "01", label: t("Setting", "Settings"), enabled: true, done: providers.some(p => p.connected) },
@@ -36,12 +39,23 @@ const App = () => {
     { k: "export", n: "05", label: "Export", enabled: slides.length > 0 },
   ];
 
-  const preset = customPreset || window.PRESETS[presetIndex];
+  const safePresetIndex = Math.min(allPresets.length - 1, Math.max(0, presetIndex));
+  const preset = customPreset || allPresets[safePresetIndex];
+
+  const savePreset = (name) => {
+    if (!customPreset) return;
+    const newPreset = { ...customPreset, name, desc: t("Preset kustom", "Custom preset") };
+    const newExtras = [...extraPresets, newPreset];
+    setExtraPresets(newExtras);
+    const newIdx = window.PRESETS.length + newExtras.length - 1;
+    setTweak("presetIndex", newIdx);
+    setCustomPreset(null);
+  };
 
   return (
     <>
       <div className="topbar">
-        <div className="brand">
+        <div className="brand" style={{ cursor: "pointer" }} onClick={() => setPage("welcome")}>
           <div className="brand-mark">L</div>
           <div>
             <div style={{ lineHeight: 1.1 }}>LiturgiToSubtitle</div>
@@ -70,7 +84,7 @@ const App = () => {
             <button className={lang === "id" ? "on" : ""} onClick={() => setLang("id")} style={{ padding: "4px 8px", fontSize: 11 }}>ID</button>
             <button className={lang === "en" ? "on" : ""} onClick={() => setLang("en")} style={{ padding: "4px 8px", fontSize: 11 }}>EN</button>
           </div>
-          <button className="btn sm"><Icon name="cog" size={12} /></button>
+          <button className="btn sm" onClick={() => setPage("settings")}><Icon name="cog" size={12} /></button>
         </div>
       </div>
 
@@ -78,8 +92,8 @@ const App = () => {
       {page === "settings" && <window.PageSettings go={setPage} lang={lang} providers={providers} setProviders={setProviders} activeProvider={activeProvider} setActiveProvider={setActiveProvider} rules={rules} setRules={setRules} />}
       {page === "upload" && <window.PageUpload go={setPage} lang={lang} file={file} setFile={setFile} />}
       {page === "parse" && <window.PageParse go={setPage} lang={lang} file={file} slides={slides} setSlides={setSlides} />}
-      {page === "editor" && <window.PageEditor go={setPage} lang={lang} slides={slides} setSlides={setSlides} presetIndex={presetIndex} setPresetIndex={setPresetIndex} customPreset={customPreset} setCustomPreset={setCustomPreset} />}
-      {page === "export" && <window.PageExport go={setPage} lang={lang} slides={slides} presetIndex={presetIndex} customPreset={customPreset} />}
+      {page === "editor" && <window.PageEditor go={setPage} lang={lang} slides={slides} setSlides={setSlides} presetIndex={safePresetIndex} setPresetIndex={setPresetIndex} customPreset={customPreset} setCustomPreset={setCustomPreset} allPresets={allPresets} savePreset={savePreset} />}
+      {page === "export" && <window.PageExport go={setPage} lang={lang} slides={slides} presetIndex={safePresetIndex} customPreset={customPreset} allPresets={allPresets} />}
 
       {showSlideshow && <window.Slideshow slides={slides.length ? slides : window.SAMPLE_SLIDES} preset={preset} onClose={() => setShowSlideshow(false)} />}
 
@@ -88,15 +102,15 @@ const App = () => {
         <window.TweakSection label="Subtitle Preset">
           <window.TweakRadio
             label="Style"
-            value={presetIndex}
+            value={safePresetIndex}
             onChange={(v) => { setPresetIndex(v); setCustomPreset(null); }}
-            options={window.PRESETS.map((p, i) => ({ value: i, label: p.name }))}
+            options={allPresets.map((p, i) => ({ value: i, label: p.name }))}
           />
           <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 6, marginTop: 10 }}>
-            {window.PRESETS.map((p, i) => (
+            {allPresets.map((p, i) => (
               <div key={i} style={{
                 aspectRatio: "16/9", background: p.bg, borderRadius: 4, position: "relative", cursor: "pointer",
-                border: presetIndex === i ? "2px solid var(--green)" : "1px solid var(--line-2)",
+                border: safePresetIndex === i ? "2px solid var(--green)" : "1px solid var(--line-2)",
                 display: "grid", placeItems: "center",
               }} onClick={() => { setPresetIndex(i); setCustomPreset(null); }}>
                 <div style={{
@@ -108,7 +122,7 @@ const App = () => {
               </div>
             ))}
           </div>
-          <div style={{ marginTop: 8, fontSize: 11, color: "var(--muted)", lineHeight: 1.5 }}>{window.PRESETS[presetIndex].desc}</div>
+          <div style={{ marginTop: 8, fontSize: 11, color: "var(--muted)", lineHeight: 1.5 }}>{allPresets[safePresetIndex].desc}</div>
         </window.TweakSection>
       </window.TweaksPanel>
     </>

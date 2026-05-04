@@ -1,11 +1,14 @@
 // Pages 2: Editor + Export + Slideshow
 
-const PageEditor = ({ go, lang, slides, setSlides, presetIndex, setPresetIndex, customPreset, setCustomPreset }) => {
+const PageEditor = ({ go, lang, slides, setSlides, presetIndex, setPresetIndex, customPreset, setCustomPreset, allPresets, savePreset }) => {
   const t = (a, b) => lang === "id" ? a : b;
   const [active, setActive] = React.useState(0);
   const [editingText, setEditingText] = React.useState(false);
+  const [savePresetName, setSavePresetName] = React.useState("");
+  const [showSaveInput, setShowSaveInput] = React.useState(false);
+  const presets = allPresets || window.PRESETS;
   const slide = slides[active];
-  const preset = customPreset || window.PRESETS[presetIndex];
+  const preset = customPreset || presets[presetIndex];
 
   const updateSlide = (patch) => {
     const next = slides.slice();
@@ -45,6 +48,28 @@ const PageEditor = ({ go, lang, slides, setSlides, presetIndex, setPresetIndex, 
     setSlides(next);
   };
 
+  const addSlide = () => {
+    const newSlide = {
+      id: Date.now(),
+      type: "verse",
+      title: t("Slide Baru", "New Slide"),
+      subtitle: "",
+      body: t("Teks subtitle di sini…", "Subtitle text here…"),
+      ref: "",
+    };
+    const next = slides.slice();
+    next.splice(active + 1, 0, newSlide);
+    setSlides(next);
+    setActive(active + 1);
+  };
+
+  const deleteSlide = (i) => {
+    if (slides.length <= 1) return;
+    const next = slides.filter((_, idx) => idx !== i);
+    setSlides(next);
+    setActive(Math.min(i, next.length - 1));
+  };
+
   return (
     <div className="page" style={{ paddingTop: 20 }}>
       <div className="page-header" style={{ marginBottom: 16 }}>
@@ -68,7 +93,7 @@ const PageEditor = ({ go, lang, slides, setSlides, presetIndex, setPresetIndex, 
         <div className="editor-col">
           <div className="editor-toolbar">
             <span className="label" style={{ flex: 1 }}>{slides.length} {t("slide", "slides")}</span>
-            <button className="btn sm ghost" title={t("Tambah slide", "Add slide")}><Icon name="plus" size={12} /></button>
+            <button className="btn sm ghost" title={t("Tambah slide", "Add slide")} onClick={addSlide}><Icon name="plus" size={12} /></button>
           </div>
           <div className="slide-list">
             {slides.map((s, i) => {
@@ -84,6 +109,13 @@ const PageEditor = ({ go, lang, slides, setSlides, presetIndex, setPresetIndex, 
                     <div className="t">{s.title}</div>
                     <div className="s" style={{ color: meta.color }}>● <span style={{ color: "var(--muted-2)" }}>{meta.label}</span></div>
                   </div>
+                  <button className="btn icon ghost danger" title={t("Hapus slide", "Delete slide")}
+                          style={{ opacity: 0, transition: "opacity .12s", flexShrink: 0 }}
+                          onMouseEnter={e => e.currentTarget.style.opacity = 1}
+                          onMouseLeave={e => e.currentTarget.style.opacity = 0}
+                          onClick={ev => { ev.stopPropagation(); deleteSlide(i); }}>
+                    <Icon name="x" size={11} />
+                  </button>
                   <span className="grip"><Icon name="grip" size={12} /></span>
                 </div>
               );
@@ -130,7 +162,7 @@ const PageEditor = ({ go, lang, slides, setSlides, presetIndex, setPresetIndex, 
             <div className="insp-group">
               <h4>{t("Template Preset", "Style Preset")}</h4>
               <div className="preset-row">
-                {window.PRESETS.map((p, i) => (
+                {presets.map((p, i) => (
                   <div key={i} className={"preset-card " + (presetIndex === i && !customPreset ? "on" : "")} style={{ background: p.bg }}
                        onClick={() => { setPresetIndex(i); setCustomPreset(null); }}>
                     <div style={{ color: p.color, fontFamily: p.font, fontStyle: p.italic ? "italic" : "normal", fontWeight: p.weight, fontSize: 9, textAlign: "center", textShadow: "0 1px 1px rgba(0,0,0,.5)", lineHeight: 1.1 }}>
@@ -262,8 +294,24 @@ const PageEditor = ({ go, lang, slides, setSlides, presetIndex, setPresetIndex, 
             </div>
 
             {/* Save preset */}
-            {customPreset && (
-              <button className="btn sm" style={{ alignSelf: "stretch" }}><Icon name="save" size={12} /> {t("Simpan sebagai preset baru", "Save as new preset")}</button>
+            {customPreset && !showSaveInput && (
+              <button className="btn sm" style={{ alignSelf: "stretch" }} onClick={() => { setSavePresetName(""); setShowSaveInput(true); }}>
+                <Icon name="save" size={12} /> {t("Simpan sebagai preset baru", "Save as new preset")}
+              </button>
+            )}
+            {customPreset && showSaveInput && (
+              <div className="col gap-2">
+                <input className="input" placeholder={t("Nama preset…", "Preset name…")} value={savePresetName} onChange={e => setSavePresetName(e.target.value)}
+                       onKeyDown={e => { if (e.key === "Enter" && savePresetName.trim()) { savePreset && savePreset(savePresetName.trim()); setShowSaveInput(false); } if (e.key === "Escape") setShowSaveInput(false); }}
+                       autoFocus />
+                <div className="row gap-2">
+                  <button className="btn sm primary" style={{ flex: 1 }} disabled={!savePresetName.trim()}
+                          onClick={() => { if (savePresetName.trim()) { savePreset && savePreset(savePresetName.trim()); setShowSaveInput(false); } }}>
+                    <Icon name="check" size={12} /> {t("Simpan", "Save")}
+                  </button>
+                  <button className="btn sm ghost" onClick={() => setShowSaveInput(false)}><Icon name="x" size={12} /></button>
+                </div>
+              </div>
             )}
           </div>
         </div>
@@ -275,9 +323,10 @@ const PageEditor = ({ go, lang, slides, setSlides, presetIndex, setPresetIndex, 
 // ============================================================
 // EXPORT
 // ============================================================
-const PageExport = ({ go, lang, slides, presetIndex, customPreset }) => {
+const PageExport = ({ go, lang, slides, presetIndex, customPreset, allPresets }) => {
   const t = (a, b) => lang === "id" ? a : b;
-  const preset = customPreset || window.PRESETS[presetIndex];
+  const presets = allPresets || window.PRESETS;
+  const preset = customPreset || presets[Math.min(presets.length - 1, presetIndex)];
   const [exportFormat, setExportFormat] = React.useState("pptx");
 
   return (
