@@ -1,5 +1,69 @@
 // Pages 1: Welcome, Settings, Upload, Parse
 
+
+const GEMINI_FREE_TIER_MODEL = "gemini-2.5-flash-lite";
+const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
+
+const GEMINI_SLIDE_SCHEMA = {
+  type: "ARRAY",
+  items: {
+    type: "OBJECT",
+    properties: {
+      type: { type: "STRING" },
+      title: { type: "STRING" },
+      subtitle: { type: "STRING" },
+      body: { type: "STRING" },
+      ref: { type: "STRING" },
+      language: { type: "STRING" },
+      needs_split: { type: "BOOLEAN" },
+      needs_hymn_lookup: { type: "BOOLEAN" },
+    },
+    required: ["type", "title", "body", "language", "needs_split", "needs_hymn_lookup"],
+  },
+};
+
+const buildGeminiGenerateUrl = (apiKey, model = GEMINI_FREE_TIER_MODEL) =>
+  `${GEMINI_API_BASE}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
+
+const getGeminiErrorMessage = async (res) => {
+  const err = await res.json().catch(() => ({}));
+  const message = err.error?.message || `HTTP ${res.status}`;
+  if (res.status === 400) return `${message} — pastikan model ${GEMINI_FREE_TIER_MODEL} tersedia untuk API key ini.`;
+  if (res.status === 403) return `${message} — API key ditolak atau Gemini API belum aktif di project Google AI Studio.`;
+  if (res.status === 429) return `${message} — kuota free tier/rate limit Gemini sedang tercapai, coba lagi nanti.`;
+  return message;
+};
+
+const testGeminiApiKey = async (apiKey) => {
+  const key = (apiKey || "").trim();
+  if (!key) throw new Error("API key Gemini belum diisi");
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(buildGeminiGenerateUrl(key), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: 'Jawab hanya dengan teks OK untuk uji koneksi API.' }] }],
+        generationConfig: { temperature: 0, maxOutputTokens: 8 },
+      }),
+    });
+
+    if (!res.ok) throw new Error(await getGeminiErrorMessage(res));
+    const data = await res.json();
+    const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('').trim();
+    if (!text) throw new Error("Gemini merespons tanpa teks kandidat");
+    return { model: GEMINI_FREE_TIER_MODEL, text };
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error("Timeout saat memanggil Gemini API");
+    throw e;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
 // ── PPTX text extraction (runs in browser via JSZip) ─────────────────────────
 const extractTextFromPptxXml = (xml) => {
   const paragraphs = [];
@@ -46,7 +110,7 @@ const extractTextFromPdf = async (fileRaw) => {
 };
 
 // ── Real Gemini parse pipeline ────────────────────────────────────────────────
-const runGeminiParsing = async ({ fileRaw, apiKey, rules, addLog, setSlides, setStep }) => {
+const runGeminiParsing = async ({ fileRaw, apiKey, rules, addLog, setSlides, setStep, model = GEMINI_FREE_TIER_MODEL }) => {
   const parseStart = Date.now();
   const ts = () => {
     const ms = Date.now() - parseStart;
@@ -99,7 +163,7 @@ const runGeminiParsing = async ({ fileRaw, apiKey, rules, addLog, setSlides, set
 
   if (isPdf) {
     const fullText = slideTexts.map((t, i) => `=== Halaman ${i + 1} ===\n${t}`).join('\n\n');
-    addLog({ t: ts(), k: "info", tag: "AI", body: `Mengirim ${slideTexts.length} halaman PDF ke Gemini 3.1 Flash Lite…` });
+    addLog({ t: ts(), k: "info", tag: "AI", body: `Mengirim ${slideTexts.length} halaman PDF ke ${model}…` });
     prompt = `${systemPrompt}
 
 Berikut adalah teks lengkap liturgi dari PDF (${slideTexts.length} halaman).
@@ -113,7 +177,7 @@ ${fullText}
 Output hanya JSON array:`;
   } else {
     const slideInput = slideTexts.map((t, i) => `--- Slide ${i + 1} ---\n${t}`).join('\n\n');
-    addLog({ t: ts(), k: "info", tag: "AI", body: `Mengirim ${slideTexts.length} slide ke Gemini 3.1 Flash Lite…` });
+    addLog({ t: ts(), k: "info", tag: "AI", body: `Mengirim ${slideTexts.length} slide ke ${model}…` });
     prompt = `${systemPrompt}
 
 Berikut adalah ${slideTexts.length} slide liturgi dari PPTX:
@@ -126,24 +190,27 @@ Keluarkan hanya JSON array sesuai schema di atas:`;
   // Step 3: call Gemini API
   try {
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${apiKey}`,
+      buildGeminiGenerateUrl(apiKey, model),
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { temperature: 0.2, responseMimeType: 'application/json' },
+          generationConfig: { temperature: 0.2, responseMimeType: 'application/json', responseSchema: GEMINI_SLIDE_SCHEMA },
         }),
       }
     );
 
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error?.message || `HTTP ${res.status}`);
+      throw new Error(await getGeminiErrorMessage(res));
     }
 
     const data = await res.json();
-    const jsonText = data.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
+    const finishReason = data.candidates?.[0]?.finishReason;
+    const jsonText = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '[]';
+    if (finishReason && !['STOP', 'MAX_TOKENS'].includes(finishReason)) {
+      addLog({ t: ts(), k: "warn", tag: "AI", body: `Gemini finishReason: ${finishReason}` });
+    }
     addLog({ t: ts(), k: "info", tag: "AI", body: "Response diterima — memvalidasi schema JSON…" });
 
     let parsed;
@@ -176,7 +243,7 @@ Keluarkan hanya JSON array sesuai schema di atas:`;
 
     addLog({ t: ts(), k: "ok", tag: "PARSE", body: `${result.length} slide subtitle dihasilkan dari ${slideTexts.length} ${isPdf ? 'halaman' : 'slide'} input` });
     const tokEst = Math.round(prompt.length / 4);
-    addLog({ t: ts(), k: "ok", tag: "DONE", body: `Selesai — perkiraan ${tokEst.toLocaleString()} token (~gratis dengan API key AI Studio)` });
+    addLog({ t: ts(), k: "ok", tag: "DONE", body: `Selesai — model ${model}, perkiraan ${tokEst.toLocaleString()} token input (paket gratis mengikuti kuota Gemini API)` });
 
     setSlides(result);
     setStep(1);
@@ -341,6 +408,20 @@ const PageSettings = ({ go, lang, providers, setProviders, activeProvider, setAc
   const [editingRule, setEditingRule] = React.useState(null);
   const [newRuleKey, setNewRuleKey] = React.useState("");
   const [newRuleBody, setNewRuleBody] = React.useState("");
+  const [geminiTest, setGeminiTest] = React.useState({ status: "idle", message: "" });
+
+  const runGeminiConnectionTest = async () => {
+    setGeminiTest({ status: "testing", message: t("Menguji koneksi ke Gemini API…", "Testing Gemini API connection…") });
+    try {
+      const result = await testGeminiApiKey(apiKeys?.gemini || "");
+      setActiveProvider("gemini");
+      setProviders(ps => ps.map(p => p.id === "gemini" ? { ...p, connected: true } : p));
+      setGeminiTest({ status: "ok", message: t(`Berhasil memanggil ${result.model}. Respons: ${result.text}`, `Successfully called ${result.model}. Response: ${result.text}`) });
+    } catch (e) {
+      setProviders(ps => ps.map(p => p.id === "gemini" ? { ...p, connected: false } : p));
+      setGeminiTest({ status: "error", message: e.message });
+    }
+  };
 
   const sections = [
     { k: "ai", icon: "sparkle", label: t("AI Provider", "AI Provider") },
@@ -386,7 +467,7 @@ const PageSettings = ({ go, lang, providers, setProviders, activeProvider, setAc
                 <div className="row gap-3" style={{ marginBottom: 10 }}>
                   <div style={{ width: 32, height: 32, borderRadius: 8, background: "#1a73e8", color: "#fff", display: "grid", placeItems: "center", fontSize: 11, fontWeight: 700, fontFamily: "Geist Mono", flexShrink: 0 }}>GG</div>
                   <div>
-                    <div style={{ fontWeight: 600, fontSize: 14 }}>Google Gemini 3.1 Flash Lite — {t("Gratis", "Free")}</div>
+                    <div style={{ fontWeight: 600, fontSize: 14 }}>Google {GEMINI_FREE_TIER_MODEL} — {t("Gratis", "Free")}</div>
                     <div style={{ fontSize: 12, color: "var(--muted)" }}>{t("Dapatkan API key gratis di", "Get a free API key at")} <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style={{ color: "var(--green-2)", fontFamily: "Geist Mono", fontSize: 11 }}>aistudio.google.com/apikey</a></div>
                   </div>
                   {apiKeys?.gemini && <span className="chip green dot" style={{ marginLeft: "auto" }}>{t("Tersimpan", "Saved")}</span>}
@@ -398,9 +479,15 @@ const PageSettings = ({ go, lang, providers, setProviders, activeProvider, setAc
                     type="password"
                     placeholder="AIza…"
                     value={apiKeys?.gemini || ""}
-                    onChange={e => saveApiKey("gemini", e.target.value)}
+                    onChange={e => { saveApiKey("gemini", e.target.value); setGeminiTest({ status: "idle", message: "" }); }}
                     style={{ fontFamily: "Geist Mono", fontSize: 12 }}
                   />
+                  <button className="btn sm primary" disabled={!apiKeys?.gemini || geminiTest.status === "testing"} onClick={runGeminiConnectionTest}>
+                    {geminiTest.status === "testing" ? t("Menguji…", "Testing…") : t("Tes API", "Test API")}
+                  </button>
+                </div>
+                <div style={{ marginTop: 10, fontSize: 12, lineHeight: 1.5, color: geminiTest.status === "error" ? "var(--warn)" : geminiTest.status === "ok" ? "var(--green-2)" : "var(--muted)" }}>
+                  {geminiTest.message || t("Model default disetel ke gemini-2.5-flash-lite karena tercantum pada pricing/rate limit Gemini API free tier.", "Default model is gemini-2.5-flash-lite because it is listed in Gemini API free-tier pricing/rate limits.")}
                 </div>
               </div>
 
@@ -644,7 +731,7 @@ const PageUpload = ({ go, lang, file, setFile }) => {
             <div style={{ display: "inline-flex", gap: 6, marginTop: 18 }}>
               <span className="chip">{t("Ekstrak lokal", "Local extract")}</span>
               <span className="chip">JSZip + PDF.js</span>
-              <span className="chip green dot">Gemini 3.1 Flash Lite</span>
+              <span className="chip green dot">${model}</span>
             </div>
           </div>
 
@@ -747,7 +834,8 @@ const PageParse = ({ go, lang, file, slides, setSlides, apiKeys, activeProvider,
 
   const geminiKey = apiKeys?.gemini;
   const hasRealFile = file?._raw instanceof File;
-  const isRealMode = hasRealFile && !!geminiKey;
+  const isGeminiActive = activeProvider === "gemini";
+  const isRealMode = hasRealFile && isGeminiActive && !!geminiKey;
 
   const addLog = React.useCallback((entry) => setRealLog(l => [...l, entry]), []);
 
@@ -755,7 +843,7 @@ const PageParse = ({ go, lang, file, slides, setSlides, apiKeys, activeProvider,
   React.useEffect(() => {
     if (!isRealMode || parseStarted.current) return;
     parseStarted.current = true;
-    runGeminiParsing({ fileRaw: file._raw, apiKey: geminiKey, rules: rules || window.PROMPT_RULES, addLog, setSlides, setStep });
+    runGeminiParsing({ fileRaw: file._raw, apiKey: geminiKey, rules: rules || window.PROMPT_RULES, addLog, setSlides, setStep, model: GEMINI_FREE_TIER_MODEL });
   }, []);
 
   // Demo animation (when no real file or no API key)
@@ -806,8 +894,8 @@ const PageParse = ({ go, lang, file, slides, setSlides, apiKeys, activeProvider,
           </h1>
           <div className="h-sub">
             {isRealMode
-              ? t("JSZip (PPTX) atau PDF.js (PDF) mengekstrak teks di browser; Gemini 3.1 Flash Lite mengklasifikasi ke 8 kategori liturgi.", "JSZip (PPTX) or PDF.js (PDF) extracts text in browser; Gemini 3.1 Flash Lite classifies into 8 liturgy categories.")
-              : t("Mode demo — tidak ada file nyata atau API key Gemini. Masuk Settings untuk menghubungkan Gemini.", "Demo mode — no real file or Gemini API key. Go to Settings to connect Gemini.")}
+              ? t(`JSZip (PPTX) atau PDF.js (PDF) mengekstrak teks di browser; ${GEMINI_FREE_TIER_MODEL} mengklasifikasi ke 8 kategori liturgi.`, `JSZip (PPTX) or PDF.js (PDF) extracts text in browser; ${GEMINI_FREE_TIER_MODEL} classifies into 8 liturgy categories.`)
+              : t("Mode demo — pilih provider Gemini, unggah file nyata, dan isi API key Gemini di Settings.", "Demo mode — select Gemini provider, upload a real file, and enter a Gemini API key in Settings.")}
           </div>
         </div>
         <button className="btn primary" disabled={step !== 1} onClick={() => go("editor")}>
@@ -859,7 +947,7 @@ const PageParse = ({ go, lang, file, slides, setSlides, apiKeys, activeProvider,
 
           {!isRealMode && step !== 1 && (
             <div style={{ marginTop: 12, padding: "10px 14px", background: "var(--warn-soft)", borderRadius: 8, border: "1px solid #fde68a", fontSize: 12, color: "var(--warn)", lineHeight: 1.5 }}>
-              {t("Tidak ada API key Gemini. ", "No Gemini API key. ")}
+              {t("Provider Gemini belum aktif atau API key belum ada. ", "Gemini provider is not active or API key is missing. ")}
               <span style={{ textDecoration: "underline", cursor: "pointer" }} onClick={() => go("settings")}>
                 {t("Buka Settings", "Open Settings")}
               </span>
@@ -871,7 +959,7 @@ const PageParse = ({ go, lang, file, slides, setSlides, apiKeys, activeProvider,
         <div>
           <div className="row" style={{ marginBottom: 8, justifyContent: "space-between" }}>
             <div className="label">{t("Log proses", "Process log")}</div>
-            <span className="chip">{isRealMode ? "Gemini 3.1 Flash Lite · free tier" : t("Demo · simulasi", "Demo · simulated")}</span>
+            <span className="chip">{isRealMode ? `${GEMINI_FREE_TIER_MODEL} · free tier` : t("Demo · simulasi", "Demo · simulated")}</span>
           </div>
           <div className="log">
             {displayLog.map((l, i) => (

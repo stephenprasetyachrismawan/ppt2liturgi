@@ -38,11 +38,14 @@ const App = () => {
   }, []);
 
   const saveApiKey = (providerId, key) => {
-    const next = { ...apiKeys, [providerId]: key };
+    const cleaned = (key || "").trim();
+    const next = { ...apiKeys };
+    if (cleaned) next[providerId] = cleaned;
+    else delete next[providerId];
     setApiKeys(next);
     try { localStorage.setItem('lts_apikeys', JSON.stringify(next)); } catch {}
     setProviders(ps => ps.map(p =>
-      p.id === providerId ? { ...p, connected: !!key.trim() } : p
+      p.id === providerId ? { ...p, connected: !!cleaned } : p
     ));
   };
 
