@@ -87,9 +87,9 @@ const PRESETS = [
 ];
 
 const PROVIDERS = [
-  { id: "openai", name: "OpenAI", model: "gpt-4o", logo: "AI", bg: "#10a37f", connected: true, recommended: true, note: "Vision + cepat" },
+  { id: "openai", name: "OpenAI", model: "gpt-4o", logo: "AI", bg: "#10a37f", connected: false, recommended: false, note: "Provider cadangan (belum diimplementasi)" },
   { id: "anthropic", name: "Anthropic Claude", model: "claude-sonnet-4.5", logo: "AN", bg: "#d97757", connected: false, note: "Konteks panjang, parsing rapi" },
-  { id: "gemini", name: "Google Gemini", model: "gemini-3.1-flash-lite", logo: "GG", bg: "#1a73e8", connected: false, recommended: false, note: "Gratis via AI Studio · kuota cukup" },
+  { id: "gemini", name: "Google Gemini", model: "gemini-2.5-flash-lite", logo: "GG", bg: "#1a73e8", connected: false, recommended: true, note: "Free tier AI Studio · model resmi berbiaya gratis" },
   { id: "ollama", name: "Local Ollama", model: "llama3.1:8b", logo: "OL", bg: "#0c0a09", connected: false, note: "Offline, privat" },
 ];
 
@@ -113,12 +113,12 @@ const PARSE_LOG = [
   { t: "00:00.12", k: "info", tag: "EXTRACT", body: "python-pptx: ekstrak text frame, image shape, notes_slide" },
   { t: "00:00.31", k: "info", tag: "OCR", body: "Slide 4 & 9 berisi gambar — Tesseract id+eng dijalankan" },
   { t: "00:01.18", k: "ok", tag: "OCR", body: "2/2 slide berhasil di-OCR (confidence rata-rata 94.2%)" },
-  { t: "00:01.22", k: "info", tag: "AI", body: "GPT-4o: kirim 14 slide untuk klasifikasi & strukturisasi" },
+  { t: "00:01.22", k: "info", tag: "AI", body: "gemini-2.5-flash-lite: kirim 14 slide untuk klasifikasi & strukturisasi" },
   { t: "00:03.04", k: "info", tag: "AI", body: "applying RULE.SPLIT — KJ 10 dipecah menjadi 2 bait" },
   { t: "00:03.41", k: "info", tag: "AI", body: "applying RULE.REF — Yohanes 3:16 split menjadi -a, -b" },
   { t: "00:04.12", k: "warn", tag: "AI", body: "Slide 12 (warta) >80 chars — needs_split: true" },
   { t: "00:04.55", k: "ok", tag: "PARSE", body: "11 slide subtitle dihasilkan dari 14 slide input" },
-  { t: "00:04.60", k: "ok", tag: "DONE", body: "siap diedit — token used: 4,128 in / 1,902 out (~$0.024)" },
+  { t: "00:04.60", k: "ok", tag: "DONE", body: "siap diedit — estimasi token input 4,128 (free tier Gemini API)" },
 ];
 
 window.SAMPLE_SLIDES = SAMPLE_SLIDES;
